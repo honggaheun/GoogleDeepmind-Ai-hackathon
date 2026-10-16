@@ -1432,6 +1432,10 @@ html, body {
   border-radius: 4px;
 }
 
+#placesAttr {
+  margin-right: 6px;
+}
+
 .mk-wrap {
   /* Outer wrapper transform managed by MapLibre */
 }
@@ -1859,6 +1863,27 @@ html, body {
   transition: height .09s ease;
 }
 
+#liveMeter.speaking {
+  background: var(--brand-soft);
+  color: var(--brand-2);
+  animation: meterPulse 1.2s ease-in-out infinite;
+}
+
+#liveMeter.speaking .lm-bars i {
+  background: var(--brand);
+}
+
+@keyframes meterPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.02);
+  }
+}
+
 /* Visibility rules by body state */
 
 body.viewing #map,
@@ -2037,6 +2062,7 @@ body.editing .dock-row.secondary {
   #stageBadge {
     top: auto;
     left: 50%;
+    transform: translateX(-50%);
     bottom: calc(var(--answer-h, 0px) + 60px);
     max-width: calc(100vw - 24px);
   }

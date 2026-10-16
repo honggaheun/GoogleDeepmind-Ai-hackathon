@@ -33,6 +33,8 @@ const S = {
   photoRole: "target",
   lastSid: null,
   replaying: false,
+  _sbUpdated: false,
+  _sbToasted: false,
   examples: [],
   answeredDecision: null,
   prevRanks: {},
@@ -159,6 +161,7 @@ const VENUE = [127.06370, 37.50680];
 const METER = {
   ctx: null,
   an: null,
+  timer: null,
   raf: null,
   at: 0,
   levels: [],
@@ -408,6 +411,11 @@ function clearMap() {
   S.drawn.clear();
   S.lmDrawn.clear();
   S.lmSeen.clear();
+  const pAttr = $("#placesAttr");
+  if (pAttr) {
+    pAttr.hidden = true;
+    pAttr.textContent = "";
+  }
   const sources = ["win", "paths", "cands", "final", "baseline", "cones", "places"];
   for (const src of sources) {
     const s = map && map.getSource(src);
@@ -1695,11 +1703,19 @@ function drawMap(resp) {
     drawLandmarks(resp.evidence);
   }
   if (resp.places && resp.places.length > 0) {
-    drawLandmarks(resp.places);
+    const placesSrc = map && map.getSource("places");
+    if (placesSrc) {
+      const feats = resp.places.filter((p) => p.lnglat).map((p) => ({
+        type: "Feature",
+        properties: { name: p.name || "", category: p.category || "" },
+        geometry: { type: "Point", coordinates: p.lnglat },
+      }));
+      placesSrc.setData(FC(feats));
+    }
     const pAttr = $("#placesAttr");
     if (pAttr) {
       pAttr.hidden = false;
-      pAttr.textContent = ` · 장소 자료: 카카오 ${resp.places.length}곳(이번 검색)`;
+      pAttr.textContent = `장소 자료: 카카오 ${resp.places.length}곳(이번 검색)`;
     }
   }
   if (resp.decision && !S.drawn.has("decision")) {
@@ -1710,13 +1726,27 @@ function drawMap(resp) {
 
 // Updates signboard detection readout
 function renderSignboard(resp) {
-  const sb = resp && resp.signboard;
+  const sb = resp && (resp.signboard || (resp.input && resp.input.signboard));
   if (!sb) return;
-  const names = sb.names ? sb.names.join(", ") : "";
-  if (names) {
-    toast(`간판: ${names}${sb.applied ? " → 지도 검색" : ""}`);
-  } else if (sb.attempted) {
-    toast("간판을 읽지 못했어요 — 닮음 대조만");
+  const txt = $("#photoText");
+  const names = Array.isArray(sb.names) ? sb.names.join(", ") : (sb.names || "");
+  if (!S._sbUpdated && txt) {
+    if (names) {
+      txt.textContent = `간판: ${names} → 지도 검색`;
+      S._sbUpdated = true;
+    } else {
+      txt.textContent = "간판을 읽지 못했어요 — 닮음 대조만";
+      S._sbUpdated = true;
+    }
+  }
+  if (!S._sbToasted) {
+    if (names) {
+      toast(`간판: ${names}${sb.applied ? " → 지도 검색" : ""}`);
+      S._sbToasted = true;
+    } else if (sb.attempted || sb.failed || names === "") {
+      toast("간판을 읽지 못했어요 — 닮음 대조만");
+      S._sbToasted = true;
+    }
   }
 }
 
@@ -1757,7 +1787,7 @@ function fitBadge(b, stage) {
 function renderBadge(resp) {
   const b = $("#stageBadge");
   if (!b) return;
-  if (!resp || !resp.progress) {
+  if (!resp || !resp.progress || resp.decision || resp.done) {
     b.hidden = true;
     return;
   }
@@ -1766,16 +1796,14 @@ function renderBadge(resp) {
   const prog = resp.progress || [];
   const cur = prog.find((p) => p.status === "running") || prog[prog.length - 1];
   const stg = cur ? cur.stage : "parse";
-  const who = STAGE_WHO[stg] || "Gemini";
+  const who = STAGE_WHO[stg] || "Gemini 4 Argon";
+
+  b.appendChild(el("div", { class: "spinner" }));
   b.appendChild(el("span", { class: "m" }, who));
-  if (cur && cur.status === "running") {
-    b.appendChild(el("div", { class: "spinner" }));
-    const disc = discovery(resp);
-    const sub = disc || cur.sub || STAGE_HINT[stg];
-    b.appendChild(el("span", {}, `${STAGE_KO[stg]} 중 · ${sub}`));
-  } else {
-    b.appendChild(el("span", {}, `${STAGE_KO[stg]} · 완료`));
-  }
+
+  const disc = discovery(resp);
+  const sub = disc || (cur && cur.sub) || STAGE_HINT[stg] || "진행 중";
+  b.appendChild(el("span", {}, `${STAGE_KO[stg]} · ${sub}`));
   fitBadge(b, stg);
 }
 
@@ -1820,6 +1848,8 @@ function resetAll() {
   S.sid = null;
   S.resp = null;
   S.drawn.clear();
+  S._sbUpdated = false;
+  S._sbToasted = false;
   setState("idle");
   renderSpans(null);
   renderTimeline(null);
@@ -1850,7 +1880,8 @@ function setBusy(on) {
 // Polls session status endpoint
 function poll() {
   if (!S.sid) return;
-  fetch(`/api/session/${S.sid}`, { cache: "no-store" })
+  const url = S.sid === "mock" ? "mock_locate.json" : `/api/session/${S.sid}`;
+  fetch(url, { cache: "no-store" })
     .then((r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
@@ -1865,12 +1896,16 @@ function poll() {
           const replay = $("#replayBtn");
           if (replay) replay.hidden = false;
         }
+        if (S.replaying) {
+          S.replaying = false;
+        }
       }
     })
     .catch((e) => {
       showError(`조회 실패: ${e.message}`);
       stopPolling();
       setBusy(false);
+      S.replaying = false;
     });
 }
 
@@ -1910,6 +1945,16 @@ function runText(text) {
   if (!query && !S.photo) {
     showError("길 설명을 적거나 사진을 넣어 주세요.");
     return;
+  }
+  if (!query && S.photo) {
+    S.photoRole = "target";
+    const roleBox = $("#photoRole");
+    if (roleBox) {
+      roleBox.querySelectorAll("button").forEach((b) => {
+        if (b.dataset.role === "target") b.classList.add("on");
+        else b.classList.remove("on");
+      });
+    }
   }
   resetAll();
   setBusy(true);
@@ -2045,47 +2090,104 @@ function sendAnswer(body) {
 
 // Starts audio level visualizer
 function meterStart(stream, opts = {}) {
+  meterStop();
   const box = $("#liveMeter");
+  const stateLbl = $("#liveState");
   if (box) box.hidden = false;
+
+  METER.speaking = typeof opts.speaking === "function" ? opts.speaking : () => false;
+  METER.label = typeof opts.label === "function" ? opts.label : () => (opts.label || "듣는 중");
+  METER.levels = new Array(METER_BARS).fill(0);
+
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
     METER.ctx = new AudioCtx();
     METER.an = METER.ctx.createAnalyser();
-    METER.an.fftSize = 64;
+    METER.an.fftSize = 1024;
     const src = METER.ctx.createMediaStreamSource(stream);
     src.connect(METER.an);
-    const bars = box ? box.querySelectorAll(".lm-bars i") : [];
-    const buf = new Uint8Array(METER.an.frequencyBinCount);
 
-    function loop() {
-      METER.an.getByteFrequencyData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i];
-      const avg = sum / buf.length;
-      METER.speaking = () => avg > 20;
-      for (let i = 0; i < bars.length; i++) {
-        const val = buf[i * 2] || 0;
-        bars[i].style.height = `${Math.max(4, (val / 255) * 20)}px`;
+    const bars = box ? box.querySelectorAll(".lm-bars i") : [];
+    const buf = new Float32Array(METER.an.fftSize);
+
+    function tick() {
+      if (!METER.an) return;
+      let rms = 0;
+      if (typeof METER.an.getFloatTimeDomainData === "function") {
+        METER.an.getFloatTimeDomainData(buf);
+        let sumSq = 0;
+        for (let i = 0; i < buf.length; i++) {
+          sumSq += buf[i] * buf[i];
+        }
+        rms = Math.sqrt(sumSq / buf.length);
+      } else {
+        const byteBuf = new Uint8Array(METER.an.fftSize);
+        METER.an.getByteTimeDomainData(byteBuf);
+        let sumSq = 0;
+        for (let i = 0; i < byteBuf.length; i++) {
+          const val = (byteBuf[i] - 128) / 128;
+          sumSq += val * val;
+        }
+        rms = Math.sqrt(sumSq / byteBuf.length);
       }
-      METER.raf = requestAnimationFrame(loop);
+
+      const level = Math.min(Math.max(rms * 7, 0), 1);
+      METER.levels.push(level);
+      if (METER.levels.length > METER_BARS) {
+        METER.levels.shift();
+      }
+
+      for (let i = 0; i < bars.length && i < METER.levels.length; i++) {
+        const v = METER.levels[i];
+        const h = 4 + v * (22 - 4);
+        bars[i].style.height = `${Math.round(h)}px`;
+      }
+
+      const isSpeaking = METER.speaking();
+      const baseLabel = METER.label();
+      if (isSpeaking) {
+        if (box) box.classList.add("speaking");
+        if (stateLbl) stateLbl.textContent = "Gemini 말하는 중";
+      } else {
+        if (box) box.classList.remove("speaking");
+        if (level > 0.12) {
+          if (stateLbl) stateLbl.textContent = `${baseLabel} — 말소리 감지`;
+        } else {
+          if (stateLbl) stateLbl.textContent = baseLabel;
+        }
+      }
     }
-    METER.raf = requestAnimationFrame(loop);
+
+    tick();
+    METER.timer = setInterval(tick, 100);
   } catch (_) {}
 }
 window.meterStart = meterStart;
 
 // Stops audio level visualizer
 function meterStop() {
+  if (METER.timer) {
+    clearInterval(METER.timer);
+    METER.timer = null;
+  }
   if (METER.raf) {
     cancelAnimationFrame(METER.raf);
     METER.raf = null;
   }
   if (METER.ctx) {
-    METER.ctx.close();
+    try {
+      METER.ctx.close();
+    } catch (_) {}
     METER.ctx = null;
   }
+  METER.an = null;
+  METER.levels = [];
   const box = $("#liveMeter");
-  if (box) box.hidden = true;
+  if (box) {
+    box.hidden = true;
+    box.classList.remove("speaking");
+  }
 }
 window.meterStop = meterStop;
 
@@ -2104,7 +2206,7 @@ function toggleRecord() {
   }
   navigator.mediaDevices.getUserMedia({ audio: true })
     .then((stream) => {
-      meterStart(stream);
+      meterStart(stream, { label: () => "녹음 중" });
       S.chunks = [];
       S.recorder = new MediaRecorder(stream);
       S.recorder.ondataavailable = (e) => S.chunks.push(e.data);
@@ -2146,8 +2248,14 @@ function runMock() {
           decision: step >= 4 ? full.decision : null,
           candidates: step >= 2 ? full.candidates : [],
           evidence: step >= 3 ? full.evidence : [],
+          places: step >= 2 ? full.places : [],
         };
         render(partial);
+        if (step >= 4) {
+          S.lastSid = "mock";
+          const replay = $("#replayBtn");
+          if (replay) replay.hidden = false;
+        }
         if (step < 4) {
           setTimeout(next, 800);
         }
@@ -2396,6 +2504,109 @@ if (typeof maplibregl !== "undefined") {
         },
       });
     }
+
+    // 5. OSM POI layers
+    let symbolFont = ["Noto Sans Regular"];
+    for (const layer of styleLayers) {
+      if (layer.type === "symbol" && layer.layout && layer.layout["text-font"]) {
+        symbolFont = layer.layout["text-font"];
+        break;
+      }
+    }
+    const poiFilter = [
+      "!in",
+      "class",
+      "bus",
+      "atm",
+      "drinking_water",
+      "playground",
+      "cemetery",
+      "toilets",
+    ];
+    if (!map.getLayer("poi-dot") && map.getSource("openmaptiles")) {
+      map.addLayer(
+        {
+          id: "poi-dot",
+          type: "circle",
+          source: "openmaptiles",
+          "source-layer": "poi",
+          minzoom: 15.5,
+          filter: poiFilter,
+          paint: {
+            "circle-radius": 3,
+            "circle-color": "#94a3b8",
+            "circle-opacity": 0.7,
+          },
+        },
+        labelLayerId
+      );
+    }
+    if (!map.getLayer("poi-label") && map.getSource("openmaptiles")) {
+      map.addLayer({
+        id: "poi-label",
+        type: "symbol",
+        source: "openmaptiles",
+        "source-layer": "poi",
+        minzoom: 16.4,
+        filter: poiFilter,
+        layout: {
+          "text-field": [
+            "coalesce",
+            ["get", "name:ko"],
+            ["get", "name"],
+            ["get", "name:latin"],
+          ],
+          "text-font": symbolFont,
+          "text-size": 11,
+          "text-anchor": "top",
+          "text-offset": [0, 0.4],
+          "text-max-width": 8,
+          "text-optional": true,
+        },
+        paint: {
+          "text-color": "#475569",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.2,
+        },
+      });
+    }
+
+    // 6. Kakao places layers
+    if (!map.getLayer("places-dot")) {
+      map.addLayer({
+        id: "places-dot",
+        type: "circle",
+        source: "places",
+        minzoom: 15,
+        paint: {
+          "circle-radius": 4,
+          "circle-color": "#38bdf8",
+          "circle-stroke-width": 1.5,
+          "circle-stroke-color": "#ffffff",
+        },
+      });
+    }
+    if (!map.getLayer("places-label")) {
+      map.addLayer({
+        id: "places-label",
+        type: "symbol",
+        source: "places",
+        minzoom: 16.6,
+        layout: {
+          "text-field": ["get", "name"],
+          "text-font": symbolFont,
+          "text-size": 11,
+          "text-anchor": "top",
+          "text-offset": [0, 0.5],
+          "text-max-width": 8,
+        },
+        paint: {
+          "text-color": "#0284c7",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.5,
+        },
+      });
+    }
   });
 }
 
@@ -2481,8 +2692,12 @@ document.addEventListener("DOMContentLoaded", () => {
       S.photoUrl = URL.createObjectURL(file);
       const chip = $("#photoChip");
       const thumb = $("#photoThumb");
+      const txt = $("#photoText");
       if (chip) chip.hidden = false;
       if (thumb) thumb.src = S.photoUrl;
+      if (txt) txt.textContent = "사진 — 간판을 읽어 지도에서 찾고, 최신 모습으로 대조";
+      S._sbUpdated = false;
+      S._sbToasted = false;
     });
   }
 
@@ -2496,7 +2711,11 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (photoFile) photoFile.value = "";
       const chip = $("#photoChip");
+      const txt = $("#photoText");
       if (chip) chip.hidden = true;
+      if (txt) txt.textContent = "사진 — 간판을 읽어 지도에서 찾고, 최신 모습으로 대조";
+      S._sbUpdated = false;
+      S._sbToasted = false;
     });
   }
 
@@ -2530,10 +2749,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const replayBtn = $("#replayBtn");
   if (replayBtn) {
     replayBtn.addEventListener("click", () => {
-      if (S.resp) {
-        clearMap();
-        render(S.resp);
-      }
+      const lastSid = S.lastSid;
+      if (!lastSid) return;
+      resetAll();
+      S.sid = lastSid;
+      S.replaying = true;
+      if (replayBtn) replayBtn.hidden = false;
+      toast("마지막 결과를 다시 재생합니다 — API 호출 없음");
+      startPolling();
     });
   }
 
