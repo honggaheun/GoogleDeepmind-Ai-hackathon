@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>어디예요?</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap">
+  <link rel="stylesheet" href="style.css?v=1">
+</head>
+<body class="st-idle">
+  <div id="map"></div>
+  <div id="stageBadge" hidden></div>
+  <aside id="leftCol">
+    <section id="dock" class="panel">
+      <div class="brand">
+        <div class="logo">
+          <svg viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+        </div>
+        <div>
+          <h1>어디예요?</h1>
+          <p>주소를 몰라도, 설명으로 찾습니다.</p>
+        </div>
+      </div>
+      <div id="spoken" class="spoken" title="눌러서 고치기" hidden></div>
+      <textarea id="text" placeholder="길 설명을 적거나 녹음하세요." rows="3"></textarea>
+      <div id="legend" class="legend" hidden>
+        <span><i style="background:#2563eb"></i>기준점·범위</span>
+        <span><i style="background:#16a34a"></i>랜드마크</span>
+        <span><i style="background:#f97316"></i>목표</span>
+        <span><i style="background:#94a3b8"></i>이동</span>
+      </div>
+      <div class="dock-row secondary">
+        <label class="chip-input" title="구·동·역·장소 이름">
+          <input id="region" placeholder="대략 위치 (예: 송파구, 잠실역)">
+        </label>
+        <button id="photoBtn" class="icon-btn" type="button" title="목표 사진 추가(친구가 보낸 가게·건물 사진) — 최신 모습으로 대조">
+          <svg class="i" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        </button>
+        <input id="photoFile" type="file" accept="image/*" hidden>
+        <button id="here" class="icon-btn" type="button" title="현재 위치 쓰기">
+          <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+        </button>
+      </div>
+      <div id="hereLabel" hidden></div>
+      <div id="photoChip" class="photo-chip" hidden>
+        <img id="photoThumb" alt="preview">
+        <span id="photoText">사진 — 간판을 읽어 지도에서 찾고, 최신 모습으로 대조</span>
+        <span id="photoRole" class="seg" title="이 사진은 어느 곳이에요?">
+          <button class="on" type="button" data-role="target">찾는 곳</button>
+          <button type="button" data-role="landmark">지나는 가게</button>
+        </span>
+        <button id="photoClear" type="button" title="사진 빼기">×</button>
+      </div>
+      <div class="dock-row">
+        <button id="rec" class="ghost" type="button" title="녹음해서 보내기">
+          <svg class="i" viewBox="0 0 24 24"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          <span>녹음</span>
+        </button>
+        <button id="live" class="ghost" type="button" title="3.8 Live로 말로 묻고 답 듣기">
+          <svg class="i" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          <span>Live 대화</span>
+        </button>
+        <button id="run" class="primary" type="button">
+          <span>찾기</span>
+        </button>
+      </div>
+      <div id="liveMeter" hidden>
+        <span class="lm-bars"></span>
+        <span id="liveState">듣는 중</span>
+      </div>
+      <div id="liveLog" hidden></div>
+      <button id="chipsToggle" class="ghost small" type="button">예시 ▾</button>
+      <div id="chips" class="chips"></div>
+    </section>
+    <section id="timelinePanel" class="panel">
+      <div id="tlTitle" class="panel-title" title="접기/펼치기">
+        <span>추론 과정</span>
+        <span id="tlSummary" class="tl-summary"></span>
+        <span id="totalTime" class="st-ms"></span>
+      </div>
+      <ol id="timeline"></ol>
+      <div id="safeguards" class="safeguards" hidden></div>
+    </section>
+  </aside>
+  <section id="rightCol" class="panel" hidden>
+    <div id="evTitle" class="panel-title" title="접기/펼치기">
+      <span>근거</span>
+      <span id="evCount" class="st-ms"></span>
+      <span id="evHint" class="ev-hint">펼치기</span>
+    </div>
+    <div id="evidence"></div>
+  </section>
+  <section id="answer" class="panel"></section>
+  <section id="viewer" hidden>
+    <div class="viewer-top">
+      <div class="viewer-title">
+        <span>현장 확인 — Gemini가 거리 사진을 봅니다</span>
+      </div>
+      <span id="viewerMeta" class="st-ms"></span>
+      <button id="viewerClose" class="ghost small" type="button">지도로 돌아가기</button>
+    </div>
+    <div class="viewer-body">
+      <div id="viewerPhoto" class="photo big"></div>
+      <div id="viewerSide"></div>
+    </div>
+    <div class="viewer-foot">거리 사진은 Google 약관에 따라 지도와 같은 화면에 띄우지 않고 이 화면에서만 보여줍니다.</div>
+  </section>
+  <div id="tabs">
+    <button id="tabTimeline" type="button">추론 과정</button>
+    <button id="tabEvidence" type="button">근거 <span id="tabEvCount"></span></button>
+  </div>
+  <div id="tools">
+    <button id="warmBadge" class="badge" type="button" title="눌러서 다시 예열" hidden></button>
+    <span id="mockBadge" class="badge warn" hidden>모의 화면 · 예시 숫자</span>
+    <label class="switch" title="지도·사진·대장 없이 안내 글만 보고 Gemini가 추측한 곳을 함께 표시(같은 모델, 검증만 뺀 것)">
+      <input id="baselineToggle" type="checkbox">
+      <span>검증 없는 Gemini 비교</span>
+    </label>
+    <button id="replayBtn" class="ghost small" type="button" title="마지막 결과를 API 호출 없이 다시 재생(와이파이·429 때 시연용)" hidden>
+      <span>다시 보기</span>
+    </button>
+    <button id="evalBtn" class="ghost small" type="button">
+      <span>평가</span>
+    </button>
+  </div>
+  <div id="errorBar" hidden></div>
+  <div id="osmAttr">
+    <span id="placesAttr" hidden></span>
+    <span>© OpenStreetMap contributors</span>
+  </div>
+  <div id="evalPanel" hidden>
+    <div class="modal panel">
+      <div class="brand">
+        <h2>평가 결과</h2>
+        <button id="evalClose" class="ghost small" type="button">닫기</button>
+      </div>
+      <div id="evalBody">불러오는 중…</div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="app.js?v=1"></script>
+</body>
+</html>

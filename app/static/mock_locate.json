@@ -1,0 +1,321 @@
+{
+ "session_id": "mock",
+ "done": true,
+ "input": {
+  "text": "지하철 2호선 삼성역 3번 출구 하차 후 직진, 오토웨이 타워",
+  "region_input": null,
+  "evidence_spans": [
+   {
+    "start": 0,
+    "end": 17,
+    "kind": "anchor"
+   },
+   {
+    "start": 18,
+    "end": 25,
+    "kind": "step"
+   },
+   {
+    "start": 27,
+    "end": 34,
+    "kind": "target"
+   }
+  ]
+ },
+ "window": {
+  "center": [
+   127.0631267,
+   37.5082553
+  ],
+  "radius_m": 500,
+  "source": "text",
+  "label": "삼성역"
+ },
+ "progress": [
+  {
+   "stage": "parse",
+   "status": "done",
+   "ms": 4614,
+   "note": "",
+   "features": [
+    "3.8 Flash",
+    "구조화 출력"
+   ]
+  },
+  {
+   "stage": "search",
+   "status": "done",
+   "ms": 2249,
+   "note": "",
+   "features": [
+    "전국 지도",
+    "카카오"
+   ]
+  },
+  {
+   "stage": "verify",
+   "status": "done",
+   "ms": 8087,
+   "note": "",
+   "features": [
+    "Embedding 2",
+    "3.8 Flash 박스",
+    "Flash-Lite 2차"
+   ]
+  },
+  {
+   "stage": "judge",
+   "status": "done",
+   "ms": 4272,
+   "note": "",
+   "features": [
+    "3.8 Flash medium"
+   ]
+  }
+ ],
+ "anchor": {
+  "name": "삼성역 3번 출구",
+  "lnglat": [
+   127.0631267,
+   37.5082553
+  ]
+ },
+ "candidates": [
+  {
+   "id": "C1",
+   "type": "named_place",
+   "osm_id": 475633202,
+   "name": "오토웨이타워",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       127.0632653,
+       37.506504
+      ],
+      [
+       127.0638001,
+       37.5066898
+      ],
+      [
+       127.0641203,
+       37.5061097
+      ],
+      [
+       127.0635855,
+       37.5059239
+      ],
+      [
+       127.0632653,
+       37.506504
+      ]
+     ]
+    ]
+   },
+   "centroid": [
+    127.0636928,
+    37.5063069
+   ],
+   "entrance": null,
+   "score": 4.25,
+   "rank": 1,
+   "levels": 9,
+   "path": [
+    [
+     127.0631267,
+     37.5082553
+    ],
+    [
+     127.0632067,
+     37.5083535
+    ],
+    [
+     127.0636504,
+     37.5074976
+    ],
+    [
+     127.0627007,
+     37.5071899
+    ],
+    [
+     127.0630564,
+     37.5065628
+    ],
+    [
+     127.0632349,
+     37.506246
+    ]
+   ],
+   "relaxations": [],
+   "view_points": []
+  }
+ ],
+ "evidence": [
+  {
+   "id": "E1",
+   "kind": "route",
+   "candidate_id": "C1",
+   "supports": true,
+   "weight": 3.0,
+   "summary_ko": "삼성역 3번 출구에서 경로 321m, 완화 없음, 경로 점수 3.00",
+   "capture_date": null,
+   "boxes": null,
+   "image_b64": null,
+   "data": {}
+  },
+  {
+   "id": "E2",
+   "kind": "vision",
+   "candidate_id": "C1",
+   "supports": true,
+   "weight": 0.5,
+   "summary_ko": "사진 속 목표 건물 약 9층 = 대장 지상 9층 — 사진 2018-05",
+   "capture_date": "2018-05",
+   "boxes": [
+    {
+     "name": "building",
+     "box_2d": [
+      80,
+      330,
+      940,
+      690
+     ],
+     "floors": 9
+    }
+   ],
+   "image_b64": null,
+   "data": {
+    "pano": [
+     127.0632349,
+     37.506246
+    ],
+    "heading": 80.5
+   }
+  },
+  {
+   "id": "E3",
+   "kind": "vision",
+   "candidate_id": "C1",
+   "supports": false,
+   "weight": -0.25,
+   "summary_ko": "간판 '오토웨이 타워': 1차 있음, 2차 아니오 — 사진 2018-05 (5년 넘음)",
+   "capture_date": "2018-05",
+   "boxes": [
+    {
+     "name": "target_sign",
+     "box_2d": [
+      40,
+      420,
+      110,
+      600
+     ],
+     "status": "present"
+    }
+   ],
+   "image_b64": null,
+   "data": {
+    "pano": [
+     127.0632349,
+     37.506246
+    ],
+    "heading": 80.5
+   }
+  },
+  {
+   "id": "E4",
+   "kind": "link",
+   "candidate_id": "C1",
+   "supports": true,
+   "weight": 0.5,
+   "summary_ko": "target_building 방향 첫 건물 = 후보 건물, 14m",
+   "capture_date": "2018-05",
+   "boxes": null,
+   "image_b64": null,
+   "data": {
+    "pano": [
+     127.0632349,
+     37.506246
+    ],
+    "heading": 80.5
+   }
+  },
+  {
+   "id": "E5",
+   "kind": "registry",
+   "candidate_id": "C1",
+   "supports": null,
+   "weight": 0.0,
+   "summary_ko": "대장: 오토웨이 타워, 지상 9층·지하 5층, 업무시설, 사용승인 20140207",
+   "capture_date": null,
+   "boxes": null,
+   "image_b64": null,
+   "data": {}
+  }
+ ],
+ "decision": {
+  "kind": "answer",
+  "candidate_id": "C1",
+  "confidence": "high",
+  "reasons": [
+   {
+    "text_ko": "삼성역 3번 출구에서 직진하는 경로와 완화 없이 맞습니다.",
+    "evidence_ids": [
+     "E1"
+    ]
+   },
+   {
+    "text_ko": "사진 방향의 첫 건물이 후보 건물이고 사진 속 층수가 대장과 같습니다.",
+    "evidence_ids": [
+     "E2",
+     "E4"
+    ]
+   },
+   {
+    "text_ko": "건축물대장 이름이 '오토웨이 타워'로 일치합니다.",
+    "evidence_ids": [
+     "E5"
+    ]
+   }
+  ],
+  "question": null
+ },
+ "safeguards": [
+  {
+   "kind": "invented_removed",
+   "count": 1,
+   "text_ko": "지어낸 요소 1건 제거"
+  },
+  {
+   "kind": "vision_flipped",
+   "count": 1,
+   "text_ko": "시각 착각 1건 뒤집힘"
+  },
+  {
+   "kind": "old_photo_discount",
+   "count": 2,
+   "text_ko": "오래된 사진(5년 넘음) 2장: 간판·색은 가중치 절반, 구조만 신뢰"
+  }
+ ],
+ "baseline": {
+  "lnglat": [
+   127.0636928,
+   37.5078448
+  ],
+  "address": "서울특별시 강남구 영동대로 417 (예시)",
+  "confidence": "medium",
+  "distance_to_result_m": 128
+ },
+ "stats": {
+  "invented": 1,
+  "vision_images": 3,
+  "vision_first_present": 1,
+  "vision_flipped": 1,
+  "gemini_calls": 7
+ },
+ "tts_text": "오토웨이타워로 보여요. 삼성역 3번 출구에서 직진하는 경로와 완화 없이 맞습니다. 확신도는 높음이에요.",
+ "notes": [
+  "모의 데이터: 카카오 결과·거리 사진은 넣지 않음(OSM·대장 캐시·예시 문장만)"
+ ],
+ "attribution": "© OpenStreetMap contributors"
+}
