@@ -1,0 +1,14 @@
+# local data and caches
+data/
+cache/
+logs/
+*.sqlite
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# secrets
+.env
+*.key
+*.pem
