@@ -521,6 +521,38 @@ def _features(
     return chips
 
 
+def _walk_path(md, start, end) -> list:
+    import networkx as nx
+    from app import mapdata
+
+    s_pt = [start.lng, start.lat] if hasattr(start, "lng") else [float(start[0]), float(start[1])]
+    e_pt = [end.lng, end.lat] if hasattr(end, "lng") else [float(end[0]), float(end[1])]
+
+    def _dedup(coords: list[list[float]]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for p in coords:
+            if not out or out[-1] != p:
+                out.append(p)
+        return out
+
+    fallback = [s_pt, e_pt]
+    if md is None or getattr(md, "graph", None) is None:
+        return _dedup(fallback)
+
+    try:
+        s = mapdata.nearest_node(md, start, max_m=120)
+        t = mapdata.nearest_node(md, end, max_m=120)
+        if s is None or t is None:
+            return _dedup(fallback)
+        nodes = nx.shortest_path(md.graph, source=s, target=t, weight="length_m")
+        coords = [s_pt] + [[md.nodes[n].lng, md.nodes[n].lat] for n in nodes] + [e_pt]
+        return _dedup(coords)
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return _dedup(fallback)
+    except Exception:
+        return _dedup(fallback)
+
+
 def _attach_building_and_vp(cand: Candidate, md, from_pt: LatLng):
     """Attach nearest OSM building polygon, levels, and street viewpoint to cand."""
     from app import mapdata
@@ -814,13 +846,18 @@ def _fallback_search(pr: ParseResult, region: str | None, current: LatLng | None
                     break
         for idx, h in enumerate(sb_hits[:2], start=1):
             cid = f"C{idx}"
+            if md is None:
+                try:
+                    md = mapdata.load_area(h.at, 450)
+                except Exception:
+                    pass
             c = Candidate(
                 id=cid,
                 type="named_place",
                 name=h.name,
                 centroid=h.at,
                 geometry={"type": "Point", "coordinates": [h.at.lng, h.at.lat]},
-                path=[anchor.at, h.at],
+                path=_walk_path(md, anchor.at, h.at),
                 route_score=3.2 if idx == 1 else 1.2,
             )
             md = _attach_building_and_vp(c, md, anchor.at)
@@ -897,13 +934,18 @@ def _fallback_search(pr: ParseResult, region: str | None, current: LatLng | None
         )
         for idx, h in enumerate(rel_hits[:2], start=1):
             cid = f"C{idx}"
+            if md is None:
+                try:
+                    md = mapdata.load_area(h.at, 450)
+                except Exception:
+                    pass
             c = Candidate(
                 id=cid,
                 type="building" if t_kind == "building" else "named_place",
                 name=h.name,
                 centroid=h.at,
                 geometry={"type": "Point", "coordinates": [h.at.lng, h.at.lat]},
-                path=[anchor.at, ref_p.at, h.at],
+                path=_walk_path(md, anchor.at, ref_p.at) + _walk_path(md, ref_p.at, h.at)[1:],
                 route_score=3.2 if idx == 1 else 1.2,
             )
             md = _attach_building_and_vp(c, md, ref_p.at)
@@ -1022,13 +1064,18 @@ def _fallback_search(pr: ParseResult, region: str | None, current: LatLng | None
         for idx, h in enumerate(hits[:2], start=1):
             cid = f"C{idx}"
             is_bldg = t_kind == "building" and not ("타워" in h.name or "문고" in h.name)
+            if md is None:
+                try:
+                    md = mapdata.load_area(h.at, 450)
+                except Exception:
+                    pass
             c = Candidate(
                 id=cid,
                 type="building" if is_bldg else "named_place",
                 name=h.name,
                 centroid=h.at,
                 geometry={"type": "Point", "coordinates": [h.at.lng, h.at.lat]},
-                path=[anchor.at, h.at],
+                path=_walk_path(md, anchor.at, h.at),
                 route_score=3.5 if idx == 1 else 1.2,
             )
             md = _attach_building_and_vp(c, md, anchor.at)
@@ -1072,13 +1119,18 @@ def _fallback_search(pr: ParseResult, region: str | None, current: LatLng | None
                 )
 
     if not cands and win.source != "none":
+        if md is None:
+            try:
+                md = mapdata.load_area(anchor.at, 450)
+            except Exception:
+                pass
         c = Candidate(
             id="C1",
             type="named_place",
             name=t_name or win.label or "목적지",
             geometry={"type": "Point", "coordinates": [anchor.at.lng, anchor.at.lat]},
             centroid=anchor.at,
-            path=[win.center, anchor.at],
+            path=_walk_path(md, win.center, anchor.at),
             route_score=3.0,
         )
         md = _attach_building_and_vp(c, md, win.center)

@@ -20,6 +20,14 @@ from app.contracts import Building, LatLng
 
 
 @dataclass
+class MapEdge:
+    u: int
+    v: int
+    edge_type: str
+    way_id: int
+
+
+@dataclass
 class MapData:
     origin: LatLng
     graph: nx.Graph
@@ -32,6 +40,13 @@ class MapData:
     _node_ids: np.ndarray
     _node_xy: np.ndarray
     _poly_way_ids: list[int] = field(default_factory=list)
+    nodes: dict[int, LatLng] = field(default_factory=dict)
+    edges: list[MapEdge] = field(default_factory=list)
+
+    def neighbors(self, node: int) -> list[int]:
+        if self.graph and node in self.graph:
+            return list(self.graph.neighbors(node))
+        return []
 
     @classmethod
     def from_parts(
@@ -85,6 +100,8 @@ class MapData:
             else np.empty((0, 2), dtype=np.float64)
         )
 
+        edge_objs = [MapEdge(u=a, v=b, edge_type=highway, way_id=way_id) for a, b, highway, way_id in edges]
+
         return cls(
             origin=origin,
             graph=g,
@@ -97,6 +114,8 @@ class MapData:
             _node_ids=node_ids,
             _node_xy=node_xy,
             _poly_way_ids=poly_way_ids,
+            nodes=nodes,
+            edges=edge_objs,
         )
 
 
@@ -134,6 +153,8 @@ def load_area(center: LatLng, radius_m: float, db_path=None) -> MapData:
 
     g = nx.Graph()
     roads_dict: dict[int, dict] = {}
+    nodes_dict: dict[int, LatLng] = {}
+    edges_list: list[MapEdge] = []
     for r in road_rows:
         way_id = r["way_id"]
         highway = r["highway"]
@@ -159,6 +180,7 @@ def load_area(center: LatLng, radius_m: float, db_path=None) -> MapData:
             lat = c_arr[2 * i + 1]
             if nid not in g:
                 p = LatLng(lat=lat, lng=lng)
+                nodes_dict[nid] = p
                 x, y = geo.to_xy(p, center)
                 g.add_node(nid, lat=lat, lng=lng, x=x, y=y)
             if i > 0:
@@ -170,6 +192,7 @@ def load_area(center: LatLng, radius_m: float, db_path=None) -> MapData:
                     LatLng(lat=curr_node["lat"], lng=curr_node["lng"]),
                 )
                 g.add_edge(prev_id, nid, highway=highway, way_id=way_id, length_m=length_m)
+                edges_list.append(MapEdge(u=prev_id, v=nid, edge_type=highway, way_id=way_id))
 
     # 2. Buildings
     bldg_rows = con.execute(
@@ -275,6 +298,8 @@ def load_area(center: LatLng, radius_m: float, db_path=None) -> MapData:
         _node_ids=node_ids,
         _node_xy=node_xy,
         _poly_way_ids=poly_way_ids,
+        nodes=nodes_dict,
+        edges=edges_list,
     )
 
 

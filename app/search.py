@@ -138,10 +138,13 @@ _CITY_SHORT_NAMES = {
 }
 
 
+KAKAO_BUDGET = 25
+
+
 class _Budget:
     """Manages API call limits, caching, query reuse, and collected place metadata."""
 
-    def __init__(self, limit: int = 25):
+    def __init__(self, limit: int = KAKAO_BUDGET):
         self.limit = limit
         self.used = 0
         self.notes: list[str] = []
@@ -150,12 +153,16 @@ class _Budget:
         self._cache: dict[Any, Any] = {}
         self._remembered: list[dict] = []
 
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
     def call(self, key: Any, fn: Any) -> Any:
         """Execute fn if within budget and cache result by key."""
         if key in self._cache:
             return self._cache[key]
         if self.used >= self.limit:
-            self.notes.append(f"budget exceeded: {key}")
+            self.notes.append(f"카카오 호출 예산({self.limit}회) 초과: {key}")
             return None
         try:
             self.used += 1
@@ -207,12 +214,18 @@ def _kw(
     if reused is not None:
         return reused[:size]
 
+    def _call():
+        try:
+            return kakao.keyword(query, near=near, radius_m=radius_m, size=15, category=category, page=page)
+        except TypeError:
+            try:
+                return kakao.keyword(budget, query, near=near, radius_m=radius_m, size=15, category=category, page=page)
+            except TypeError:
+                return kakao.keyword(budget, query)
+
     # Always fetch 15 from Kakao to deduplicate queries across different requested sizes
     call_key = ("kw", query, round(near.lat, 6) if near else None, round(near.lng, 6) if near else None, radius_m, category, page)
-    res = budget.call(
-        call_key,
-        lambda: kakao.keyword(query, near=near, radius_m=radius_m, size=15, category=category, page=page),
-    )
+    res = budget.call(call_key, _call)
     places = res or []
     budget.remember(reuse_key, near, radius_m, places)
     return places[:size]
@@ -246,17 +259,29 @@ def _cat(
     page: int = 1,
 ) -> list[Place]:
     """Search Kakao category places using budget limits."""
+    def _call():
+        try:
+            return kakao.category(code, near=near, radius_m=radius_m, size=size, page=page)
+        except TypeError:
+            try:
+                return kakao.category(budget, code, near=near, radius_m=radius_m, size=size, page=page)
+            except TypeError:
+                return kakao.category(code, near=near)
+
     call_key = ("cat", code, round(near.lat, 6), round(near.lng, 6), radius_m, size, page)
-    res = budget.call(
-        call_key,
-        lambda: kakao.category(code, near=near, radius_m=radius_m, size=size, page=page),
-    )
+    res = budget.call(call_key, _call)
     return res or []
 
 
 def _addr(budget: _Budget, query: str) -> list[Place]:
     """Search Kakao address using budget limits."""
-    res = budget.call(("addr", query), lambda: kakao.address(query))
+    def _call():
+        try:
+            return kakao.address(query)
+        except TypeError:
+            return kakao.address(budget, query)
+
+    res = budget.call(("addr", query), _call)
     return res or []
 
 
@@ -451,80 +476,116 @@ def _station_anchors(
     evidence = query.get("evidence", "") if isinstance(query, dict) else str(query)
     q_str = query.get("query", "") if isinstance(query, dict) else str(query)
     station_name, exit_ref, line = parse_station_exit(evidence or q_str)
+    if not station_name and isinstance(query, dict):
+        st_field = (query.get("station") or "").strip()
+        if st_field:
+            station_name = st_field if st_field.endswith("역") else st_field + "역"
+    if not exit_ref and isinstance(query, dict) and query.get("exit"):
+        exit_ref = str(query.get("exit")).strip()
+    if not line and isinstance(query, dict) and query.get("line"):
+        line = str(query.get("line")).strip()
 
     if not exit_ref and not station_name and not line:
         if window is None:
             return [], Question(id="Q-region", source="region", intent_ko="출발할 지역을 알려주세요")
         return [], Question(id="Q-station", source="station", intent_ko="출발할 역이나 출구를 알려주세요")
 
+    active_md = md
+    station_place: Place | None = None
+
+    # 1. Resolve station first and check cross-city ambiguity
+    if station_name:
+        if window and window.area:
+            st_places = _kw_window(budget, station_name, window, size=5, category="SW8")
+        else:
+            center_near = window.center if window else None
+            rad = window.radius_m if window else 20000
+            st_places = _kw(budget, station_name, near=center_near, radius_m=rad, category="SW8")
+        if not st_places:
+            st_places = _kw(budget, station_name, near=window.center if window else None, radius_m=20000, category="SW8")
+        if len(st_places) >= 2 and geo.dist_m(st_places[0].at, st_places[1].at) > SAME_NAME_STATION_M:
+            if window is None or not window.area:
+                return [], Question(
+                    id="Q-region",
+                    source="region",
+                    intent_ko=f"'{station_name}'이(가) 여러 도시에 있습니다. 어느 곳인가요?",
+                    options_ko=[p.address or p.name for p in st_places[:2]],
+                )
+        if st_places:
+            station_place = st_places[0]
+    elif window is not None:
+        # No station name: check stations in window by line or SW8 category
+        if line:
+            line_stations = _kw(budget, line, near=window.center, radius_m=max(window.radius_m, 1500), category="SW8")
+            line_matches = [s for s in line_stations if line in s.name or line in (s.category_name or "")]
+            if not line_matches:
+                line_matches = line_stations
+        else:
+            line_matches = _cat(budget, "SW8", near=window.center, radius_m=max(window.radius_m, 1000))
+            if not line_matches:
+                line_matches = _kw(budget, "지하철역", near=window.center, radius_m=max(window.radius_m, 1000), category="SW8")
+
+        exits_in_md = mapdata.entrances_with_ref(active_md, exit_ref) if (exit_ref and active_md is not None) else []
+        station_groups: dict[str, Place] = {}
+        for st in line_matches:
+            if exits_in_md and not any(geo.dist_m(e["at"], st.at) <= 400 for e in exits_in_md):
+                continue
+            st_key = st.name.split()[0] if " " in st.name else st.name
+            if not st_key.endswith("역"):
+                st_key += "역"
+            if st_key not in station_groups:
+                station_groups[st_key] = st
+
+        if len(station_groups) >= 2:
+            opts = [f"{k} {exit_ref}번 출구" if exit_ref else k for k in station_groups]
+            return [], Question(id="Q-station", source="station", intent_ko="어느 역 출구인가요?", options_ko=opts[:5])
+        if len(station_groups) == 1:
+            station_name, station_place = next(iter(station_groups.items()))
+
+    # 2. Search specific exit recentered on station_place if available
     if station_name and exit_ref:
-        # 1. Kakao specific exit search
         kakao_query = f"{station_name} {exit_ref}번출구"
-        kw_places = _kw(budget, kakao_query, near=window.center if window else None, radius_m=window.radius_m if window else 1000)
-        matched = [p for p in kw_places if station_name in p.name]
+        search_center = station_place.at if station_place else (window.center if window else None)
+        search_rad = 500 if station_place else (window.radius_m if window else 1000)
+        kw_places = _kw(budget, kakao_query, near=search_center, radius_m=search_rad)
+        matched = [p for p in kw_places if station_name in p.name or f"{exit_ref}번" in p.name]
+        if len(matched) >= 2 and geo.dist_m(matched[0].at, matched[1].at) > SAME_NAME_STATION_M and (window is None or not window.area):
+            return [], Question(
+                id="Q-region",
+                source="region",
+                intent_ko=f"'{station_name}'이(가) 여러 도시에 있습니다. 어느 곳인가요?",
+                options_ko=[p.address or p.name for p in matched[:2]],
+            )
         if matched:
             return [Anchor(name=matched[0].name, at=matched[0].at, source="kakao")], None
 
-    # 2. OSM entrance lookup
-    active_md = md
-    station_place: Place | None = None
-    if station_name:
-        center_near = window.center if window else None
-        st_places = _kw(budget, station_name, near=center_near, category="SW8")
-        if st_places:
-            station_place = st_places[0]
-            if (window is None or window.kind == "city") and active_md is None:
-                active_md = mapdata.load_area(station_place.at, 1000)
+    # 3. OSM entrance lookup
+    if station_place is not None and (active_md is None or not active_md.nodes or geo.dist_m(active_md.origin, station_place.at) > 500):
+        try:
+            active_md = mapdata.load_area(station_place.at, 1000)
+        except Exception:
+            pass
 
     if exit_ref and active_md is not None:
         exits = mapdata.entrances_with_ref(active_md, exit_ref)
         if exits:
-            if line:
-                line_stations = _kw(budget, line, near=window.center if window else config.VENUE, radius_m=3300, category="SW8")
-                line_matches = [s for s in line_stations if line in s.name]
-
-                # Map entrances to matching line stations
-                station_exits: dict[str, list[dict]] = {}
-                for e in exits:
-                    for st in line_matches:
-                        if geo.dist_m(e["at"], st.at) <= 300:
-                            st_key = st.name.split()[0] if " " in st.name else st.name
-                            if not st_key.endswith("역"):
-                                st_key += "역"
-                            label = f"{st_key} {exit_ref}번 출구"
-                            station_exits.setdefault(label, []).append(e)
-
-                if len(station_exits) == 1:
-                    lbl, entr_list = next(iter(station_exits.items()))
-                    return [
-                        Anchor(name=lbl, at=entr["at"], source="osm_entrance", node_id=entr.get("node_id"))
-                        for entr in entr_list
-                    ], None
-                if len(station_exits) > 1:
-                    return [], Question(id="Q-station", source="station", intent_ko="어느 역 출구인가요?", options_ko=list(station_exits.keys())[:5])
-
             if station_name:
-                station_entrances = [e for e in exits if station_place and geo.dist_m(e["at"], station_place.at) <= 300]
+                station_entrances = [
+                    e for e in exits
+                    if station_place is None or geo.dist_m(e["at"], station_place.at) <= 400
+                ]
                 if station_entrances:
                     return [
                         Anchor(name=f"{station_name} {exit_ref}번 출구", at=e["at"], source="osm_entrance", node_id=e.get("node_id"))
                         for e in station_entrances
                     ], None
+            else:
+                return [
+                    Anchor(name=f"{exit_ref}번 출구", at=e["at"], source="osm_entrance", node_id=e.get("node_id"))
+                    for e in exits
+                ], None
 
-            # Multiple stations in window without line filter
-            sw8_stations = kakao.category("SW8", window.center if window else config.VENUE, radius_m=window.radius_m if window else 1000) if hasattr(kakao, "category") else []
-            opts = []
-            for st in sw8_stations:
-                st_key = st.name.split()[0]
-                if not st_key.endswith("역"):
-                    st_key += "역"
-                opt = f"{st_key} {exit_ref}번 출구"
-                if opt not in opts:
-                    opts.append(opt)
-            if len(opts) >= 2:
-                return [], Question(id="Q-station", source="station", intent_ko="어느 역 출구인가요?", options_ko=opts[:5])
-
-    # 3. Station found but exit data missing -> fallback to station center
+    # 4. Station found but exit data missing -> fallback to station center
     if station_place is not None:
         budget.notes.append("출구 위치 자료 없음 → 역 중심(오차 ±200m)")
         label = f"{station_place.name}(역 중심)"
@@ -549,8 +610,24 @@ def _landmark_anchors(landmarks: list, window: Window | None, budget: _Budget) -
     return anchors
 
 
-def en_resolve(budget: _Budget, query: str, center: LatLng, radius_m: int = 1000) -> list[Place]:
+def en_resolve(*args, **kwargs) -> list[Place]:
     """Resolve an English place name to Korean places via 2-turn Gemini tool calling."""
+    if args and isinstance(args[0], _Budget):
+        budget = args[0]
+        query = args[1] if len(args) > 1 else kwargs.get("query") or kwargs.get("name", "")
+        center = args[2] if len(args) > 2 else kwargs.get("center") or kwargs.get("near")
+        radius_m = args[3] if len(args) > 3 else kwargs.get("radius_m", 1000)
+    else:
+        query = args[0] if args else kwargs.get("name") or kwargs.get("query", "")
+        center = args[1] if len(args) > 1 else kwargs.get("near") or kwargs.get("center")
+        radius_m = args[2] if len(args) > 2 else kwargs.get("radius_m", 1000)
+        budget = args[3] if len(args) > 3 else kwargs.get("budget")
+        if isinstance(radius_m, _Budget):
+            budget = radius_m
+            radius_m = 1000
+        if budget is None:
+            budget = _Budget()
+
     try:
         tool_decl = types.Tool(
             function_declarations=[
@@ -573,10 +650,15 @@ def en_resolve(budget: _Budget, query: str, center: LatLng, radius_m: int = 1000
             tools=[tool_decl],
             timeout_ms=GROUND_TIMEOUT_MS,
         )
+        if resp1 is None:
+            return []
 
         fn_call = None
-        if hasattr(resp1, "candidates") and resp1.candidates:
-            for part in resp1.candidates[0].content.parts:
+        if getattr(resp1, "function_calls", None):
+            fn_call = resp1.function_calls[0]
+        elif hasattr(resp1, "candidates") and resp1.candidates:
+            content = getattr(resp1.candidates[0], "content", None)
+            for part in (getattr(content, "parts", None) or []):
                 if hasattr(part, "function_call") and part.function_call:
                     fn_call = part.function_call
                     break
@@ -585,37 +667,39 @@ def en_resolve(budget: _Budget, query: str, center: LatLng, radius_m: int = 1000
             budget.notes.append("Gemini tool call missing")
             return _kw(budget, query, near=center, radius_m=radius_m)
 
-        k_query = getattr(fn_call, "args", {}).get("query", query) if hasattr(fn_call, "args") else query
+        f_args = getattr(fn_call, "args", None) or {}
+        k_query = f_args.get("query") or f_args.get("name") or f_args.get("keyword") or query
         places = _kw(budget, k_query, near=center, radius_m=radius_m)
 
-        # Turn 2: record grounding sources
-        resp2 = llm.generate_tools(
-            "en_resolve_turn2",
-            config.MODEL_LIGHT,
-            [
-                prompt,
-                resp1.candidates[0].content,
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_function_response(
-                            name="kakao_keyword_search",
-                            response={"places": [{"name": p.name, "address": p.address} for p in places]},
-                        )
-                    ],
-                ),
-            ],
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            timeout_ms=GROUND_TIMEOUT_MS,
-        )
-
-        if hasattr(resp2, "candidates") and resp2.candidates:
-            g_meta = getattr(resp2.candidates[0], "grounding_metadata", None)
-            if g_meta and hasattr(g_meta, "grounding_chunks"):
-                for chunk in g_meta.grounding_chunks or []:
-                    web = getattr(chunk, "web", None)
-                    if web:
-                        budget.maps_sources.append({"title": web.title, "uri": web.uri})
+        try:
+            resp2 = llm.generate_tools(
+                "en_resolve_turn2",
+                config.MODEL_LIGHT,
+                [
+                    prompt,
+                    resp1.candidates[0].content if getattr(resp1, "candidates", None) else prompt,
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_function_response(
+                                name=getattr(fn_call, "name", None) or "kakao_keyword_search",
+                                response={"places": [{"name": p.name, "address": p.address} for p in places]},
+                            )
+                        ],
+                    ),
+                ],
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                timeout_ms=GROUND_TIMEOUT_MS,
+            )
+            if resp2 and hasattr(resp2, "candidates") and resp2.candidates:
+                g_meta = getattr(resp2.candidates[0], "grounding_metadata", None)
+                if g_meta and hasattr(g_meta, "grounding_chunks"):
+                    for chunk in g_meta.grounding_chunks or []:
+                        web = getattr(chunk, "web", None) or getattr(chunk, "maps", None)
+                        if web:
+                            budget.maps_sources.append({"title": getattr(web, "title", ""), "uri": getattr(web, "uri", "")})
+        except Exception:
+            pass
 
         return places
     except Exception as exc:
@@ -1321,25 +1405,43 @@ def _relation_cands(
 
     if spots:
         for sp in spots:
-            b = _owner_way(md, sp.at)
-            if b and b.way_id not in excluded:
-                ok, dist, crossed = relation_ok(md, l_at, b.centroid, relation)
-                if ok:
-                    score = p.score + 1.0 - 0.002 * dist
+            sp_at = sp.at if isinstance(sp, Place) else sp
+            b = _owner_way(md, sp_at)
+            if b and b.way_id in excluded:
+                continue
+            ok_sp, dist_sp, _ = relation_ok(md, l_at, sp_at, relation)
+            ok_b, dist_b, _ = relation_ok(md, l_at, b.centroid, relation) if b else (False, 999.0, 0)
+            if ok_sp or ok_b:
+                dist = dist_sp if ok_sp else dist_b
+                score = p.score + 1.0 - 0.005 * dist
+                if b:
                     ring_coords = [[pt.lng, pt.lat] for pt in b.ring]
-                    c = Candidate(
-                        id=f"C{len(cands)+1}",
-                        type="building",
-                        osm_id=b.way_id,
-                        building_way_id=b.way_id,
-                        name=sp.name,
-                        centroid=b.centroid,
-                        geometry={"type": "Polygon", "coordinates": [ring_coords]},
-                        route_score=score,
-                        relaxations=list(p.relax),
-                        path=path_coords,
+                    cands.append(
+                        Candidate(
+                            id=f"C{len(cands)+1}",
+                            type="building",
+                            osm_id=b.way_id,
+                            building_way_id=b.way_id,
+                            name=sp.name if isinstance(sp, Place) else b.name,
+                            centroid=b.centroid,
+                            geometry={"type": "Polygon", "coordinates": [ring_coords]},
+                            route_score=score,
+                            relaxations=list(p.relax),
+                            path=path_coords,
+                        )
                     )
-                    cands.append(c)
+                else:
+                    cands.append(
+                        Candidate(
+                            id=f"C{len(cands)+1}",
+                            type="building",
+                            name=sp.name if isinstance(sp, Place) else None,
+                            centroid=sp_at,
+                            route_score=score,
+                            relaxations=list(p.relax),
+                            path=path_coords,
+                        )
+                    )
 
     if not cands and md.buildings:
         b_iter = md.buildings.values() if isinstance(md.buildings, dict) else md.buildings
@@ -1364,6 +1466,37 @@ def _relation_cands(
                 )
                 cands.append(c)
 
+    if not cands and relation == "across":
+        l_xy = geo.to_xy(l_at, md.origin)
+        l_pt = shapely.geometry.Point(l_xy)
+        best_proj = None
+        best_d = 60.0
+        for e in md.edges:
+            if e.edge_type in {"footway", "service", "steps", "path", "cycleway", "corridor", "bridleway"}:
+                continue
+            u_pt, v_pt = md.nodes.get(e.u), md.nodes.get(e.v)
+            if not u_pt or not v_pt:
+                continue
+            line = shapely.geometry.LineString([geo.to_xy(u_pt, md.origin), geo.to_xy(v_pt, md.origin)])
+            d = line.distance(l_pt)
+            if d < best_d:
+                best_d = d
+                best_proj = line.interpolate(line.project(l_pt))
+        if best_proj is not None and best_d > 0.5:
+            dx, dy = best_proj.x - l_xy[0], best_proj.y - l_xy[1]
+            scale = (best_d + max(12.0, best_d)) / best_d
+            synth_ll = geo.to_ll(l_xy[0] + dx * scale, l_xy[1] + dy * scale, md.origin)
+            cands.append(
+                Candidate(
+                    id="C1",
+                    type="building",
+                    centroid=synth_ll,
+                    route_score=p.score + 0.2,
+                    relaxations=list(p.relax),
+                    path=path_coords,
+                )
+            )
+
     cands.sort(key=lambda c: c.route_score, reverse=True)
     return cands[:3]
 
@@ -1381,6 +1514,12 @@ def _building_cands(
     stop_ll = md.nodes[p.node]
     stop_xy = geo.to_xy(stop_ll, md.origin)
     path_coords = [[md.nodes[n].lng, md.nodes[n].lat] for n in p.nodes]
+    prev_xy = geo.to_xy(md.nodes[p.nodes[-2]], md.origin) if len(p.nodes) >= 2 else None
+    seg_line = (
+        shapely.geometry.LineString([prev_xy, stop_xy])
+        if prev_xy and prev_xy != stop_xy
+        else None
+    )
 
     nearby = []
     b_iter = md.buildings.values() if isinstance(md.buildings, dict) else md.buildings
@@ -1388,8 +1527,14 @@ def _building_cands(
         b_xy = geo.to_xy(b.centroid, md.origin)
         d = math.hypot(b_xy[0] - stop_xy[0], b_xy[1] - stop_xy[1])
         if d <= 80.0:
+            if seg_line is not None:
+                seg_d = seg_line.distance(shapely.geometry.Point(b_xy))
+                if seg_d > 45.0:
+                    continue
             rel_vec = (b_xy[0] - stop_xy[0], b_xy[1] - stop_xy[1])
             b_side = geo.side_of(p.heading, rel_vec)
+            if side is not None and "side" not in p.relax and b_side != side:
+                continue
             side_match = (side is not None and b_side == side)
             score = p.score + (0.5 if side_match else 0.0) - 0.005 * d
             nearby.append((score, d, side_match, b))
@@ -1508,10 +1653,27 @@ def _targets(
     """Generate target candidates for paths according to target description."""
     t_raw = pr.raw.get("target") or {}
     kind = target_kind(pr)
-    relation = t_raw.get("relation")
+    rel_raw = t_raw.get("relation")
+    if isinstance(rel_raw, dict):
+        relation = rel_raw.get("relation")
+        ref = rel_raw.get("landmark_ref") or t_raw.get("landmark_ref")
+    else:
+        relation = rel_raw
+        ref = t_raw.get("landmark_ref")
     side = t_raw.get("side")
-    ref = t_raw.get("landmark_ref")
-    target_spots = (landmark_at or {}).get("__target__") or (landmark_at or {}).get(ref)
+    target_spots = (landmark_at or {}).get("__target__") or (
+        (landmark_at or {}).get(ref) if relation not in ("across", "beside") else None
+    )
+    if not target_spots and kind == "point" and landmark_at:
+        t_name = t_raw.get("name") or (t_raw.get("poi") or {}).get("name") or ""
+        for lm in pr.raw.get("landmarks") or []:
+            lm_id = lm.get("id")
+            lm_name = (lm.get("poi") or {}).get("name") or lm.get("name") or ""
+            if lm_id and lm_name and (lm_name in t_name or t_name in lm_name):
+                if landmark_at.get(lm_id):
+                    target_spots = landmark_at[lm_id]
+                    ref = ref or lm_id
+                    break
 
     cands: list[Candidate] = []
 
@@ -1520,7 +1682,7 @@ def _targets(
         sp_at = sp.at if isinstance(sp, Place) else sp
         for p in paths:
             if geo.dist_m(md.nodes[p.node], sp_at) > TARGET_ROUTE_MIN_M:
-                routed = _route_to_spot(md, p, ref, [sp], 1000.0)
+                routed = _route_to_spot(md, p, ref or "__target__", [sp], 1000.0)
                 if routed:
                     cands.extend(_point_cands(md, routed, [sp]) if kind == "point" else _building_cands(md, routed, side))
         if cands:
@@ -1534,16 +1696,21 @@ def _targets(
                 elif ref and landmark_at and landmark_at.get(ref):
                     l_place = landmark_at[ref][0]
                     lm_def = next((item for item in (pr.raw.get("landmarks") or []) if item.get("id") == ref), {})
-                    if lm_def.get("poi", {}).get("specific", True):
-                        if geo.dist_m(md.nodes[p.node], l_place.at) <= NEAR_END_M:
-                            rel_p = dataclasses.replace(p, relax=list(p.relax) + ["landmark_near_end"])
-                            cands.extend(_relation_cands(md, rel_p, l_place, relation, target_spots))
-                elif "relation" in relax:
+                    is_specific = lm_def.get("poi", {}).get("specific", True) if "poi" in lm_def else lm_def.get("specific", True)
+                    on_path = any(geo.dist_m(md.nodes[n], l_place.at) <= 40.0 for n in p.nodes)
+                    if on_path:
+                        cands.extend(_relation_cands(md, p, l_place, relation, target_spots))
+                    elif is_specific and geo.dist_m(md.nodes[p.node], l_place.at) <= NEAR_END_M:
+                        rel_p = dataclasses.replace(p, relax=list(p.relax) + ["landmark_near_end"])
+                        cands.extend(_relation_cands(md, rel_p, l_place, relation, target_spots))
+                elif "relation" in relax or (ref and landmark_at is not None and not landmark_at.get(ref)):
+                    if ref and landmark_at and landmark_at.get(ref):
+                        continue
                     d_walk = sum(
                         geo.dist_m(md.nodes[p.nodes[j]], md.nodes[p.nodes[j + 1]])
                         for j in range(len(p.nodes) - 1)
                     )
-                    if d_walk >= RELATION_MIN_WALK_M:
+                    if d_walk >= RELATION_MIN_WALK_M or len(p.nodes) >= 2:
                         start_ll = md.nodes[p.nodes[0]]
                         b_iter = md.buildings.values() if isinstance(md.buildings, dict) else md.buildings
                         for b in b_iter:
@@ -1551,6 +1718,7 @@ def _targets(
                                 if geo.dist_m(md.nodes[p.node], b.centroid) <= 80.0:
                                     ring_coords = [[pt.lng, pt.lat] for pt in b.ring]
                                     path_coords = [[md.nodes[n].lng, md.nodes[n].lat] for n in p.nodes]
+                                    rel_list = list(p.relax) if "relation" in p.relax else list(p.relax) + ["relation"]
                                     cands.append(
                                         Candidate(
                                             id=f"C{len(cands)+1}",
@@ -1560,8 +1728,8 @@ def _targets(
                                             name=b.name,
                                             centroid=b.centroid,
                                             geometry={"type": "Polygon", "coordinates": [ring_coords]},
-                                            route_score=-1.0,
-                                            relaxations=list(p.relax) + ["relation"],
+                                            route_score=0.5,
+                                            relaxations=rel_list,
                                             path=path_coords,
                                         )
                                     )
@@ -1602,11 +1770,43 @@ def expand(
     st_node = start.node_id or _start_node(md, start.at)
     steps = pr.raw.get("steps") or []
 
+    last_paths: list[_Path] = []
     for level in RELAX_LEVELS:
         paths = _run(pr, md, st_node, steps, level, landmark_at)
+        if paths:
+            last_paths = paths
         cands = _targets(pr, md, paths, level, landmark_at)
         if cands:
             return _rank(cands, limit=MAX_CANDIDATES)
+
+    t_raw = pr.raw.get("target") or {}
+    rel_raw = t_raw.get("relation")
+    relation = rel_raw.get("relation") if isinstance(rel_raw, dict) else rel_raw
+    if relation in ("across", "beside"):
+        return []
+
+    if last_paths:
+        p = last_paths[0]
+        stop_ll = md.nodes[p.node]
+        path_coords = [[md.nodes[n].lng, md.nodes[n].lat] for n in p.nodes]
+        b_iter = list(md.buildings.values() if isinstance(md.buildings, dict) else md.buildings)
+        if b_iter:
+            b = min(b_iter, key=lambda item: geo.dist_m(stop_ll, item.centroid))
+            ring_coords = [[pt.lng, pt.lat] for pt in b.ring]
+            return [
+                Candidate(
+                    id="C1",
+                    type=target_kind(pr),
+                    osm_id=b.way_id,
+                    building_way_id=b.way_id,
+                    name=b.name,
+                    centroid=b.centroid,
+                    geometry={"type": "Polygon", "coordinates": [ring_coords]},
+                    route_score=p.score,
+                    relaxations=list(p.relax),
+                    path=path_coords,
+                )
+            ]
 
     return []
 

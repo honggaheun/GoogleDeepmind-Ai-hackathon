@@ -233,7 +233,7 @@ def photo_only(region_hint: str | None = None) -> ParseResult:
         "anchor": {"evidence": "", "query": "", "kind": "none"},
         "steps": [],
         "landmarks": [],
-        "target": {"kind": "named_place", "name": "", "specific": False},
+        "target": {"kind": "named_place", "name": "", "specific": True},
         "uncertainty": {"hedges": [], "staleness": "unknown"},
         "ambiguities": [],
     }

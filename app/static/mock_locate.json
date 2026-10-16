@@ -317,5 +317,15 @@
  "notes": [
   "모의 데이터: 카카오 결과·거리 사진은 넣지 않음(OSM·대장 캐시·예시 문장만)"
  ],
+ "places": [
+  {
+   "name": "스타벅스 삼성역점",
+   "lnglat": [
+    127.0632,
+    37.5075
+   ],
+   "category": "카페"
+  }
+ ],
  "attribution": "© OpenStreetMap contributors"
 }

@@ -438,26 +438,50 @@ def tts(text: str, voice: str = "Kore") -> bytes:
 
 def warmup(image: bool = True) -> dict:
     """Warm up active Gemini models in parallel and return per-model latency and status."""
-    models = list(dict.fromkeys([config.MODEL_PARSE, config.MODEL_MAIN, config.MODEL_LIGHT]))
-    tasks: list[tuple[str, callable]] = []
     tiny_schema = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
-    for m in models:
-        thinking = None if m == config.MODEL_LIGHT else "low"
+    tasks: list[tuple[str, callable]] = [
+        (
+            "main",
+            lambda: generate_json(
+                "warmup",
+                config.MODEL_MAIN,
+                ["ping"],
+                tiny_schema,
+                thinking="low",
+                timeout_ms=15_000,
+                retry_timeouts=False,
+            ),
+        ),
+        (
+            "light",
+            lambda: generate_json(
+                "warmup",
+                config.MODEL_LIGHT,
+                ["ping"],
+                tiny_schema,
+                thinking=None,
+                timeout_ms=15_000,
+                retry_timeouts=False,
+            ),
+        ),
+    ]
+    if config.MODEL_PARSE not in (config.MODEL_MAIN, config.MODEL_LIGHT):
         tasks.append(
             (
-                m,
-                lambda model=m, th=thinking: generate_json(
+                "argon",
+                lambda: generate_json(
                     "warmup",
-                    model,
+                    config.MODEL_PARSE,
                     ["ping"],
                     tiny_schema,
-                    thinking=th,
+                    thinking="low",
                     timeout_ms=15_000,
                     retry_timeouts=False,
                 ),
             )
         )
-    tasks.append((config.MODEL_EMBED, lambda: embed("예열")))
+    tasks.append(("embed", lambda: embed("예열")))
+    tasks.append(("tts", lambda: tts("예열")))
 
     results: dict = {}
 
@@ -470,7 +494,7 @@ def warmup(image: bool = True) -> dict:
             return name, {
                 "ms": int((time.monotonic() - t0) * 1000),
                 "ok": False,
-                "error": config.mask(str(exc)),
+                "error": config.mask(f"{type(exc).__name__}: {exc}"),
             }
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
