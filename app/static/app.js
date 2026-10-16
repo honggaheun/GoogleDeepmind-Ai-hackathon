@@ -1,10 +1,10 @@
 /**
- * Main application logic for multimodal spatial search UI.
- * Handles speech input, reasoning timeline, MapLibre 3D visualization,
- * evidence inspector, and decision verdict presentation.
+ * Multimodal spatial search UI client application.
+ * Manages audio recording, MapLibre 3D rendering, reasoning timeline,
+ * evidence inspector, Street View viewer, and verdict presentation.
  */
 
-// Global application state
+// Global client state container
 const S = {
   sid: null,
   timer: null,
@@ -23,16 +23,19 @@ const S = {
   questionSource: null,
   pathAnim: null,
   viewerDone: null,
+  viewerResolve: null,
   photoGroups: [],
   walk: null,
   lmDrawn: new Set(),
   lmSeen: new Set(),
   photo: null,
+  photoUrl: null,
   photoRole: "target",
   lastSid: null,
   replaying: false,
   examples: [],
   answeredDecision: null,
+  prevRanks: {},
 };
 
 // Stage labels in Korean
@@ -43,7 +46,7 @@ const STAGE_KO = {
   judge: "판정",
 };
 
-// Hints for each stage
+// Explanatory hint for each reasoning stage
 const STAGE_HINT = {
   parse: "말을 검증 가능한 요소로 나눕니다",
   search: "기준점·경로·후보를 지도에서 찾습니다",
@@ -59,7 +62,7 @@ const STAGE_WHO = {
   judge: "Gemini 4 Argon 판관",
 };
 
-// Short stage executor labels for compact badge
+// Short stage executor labels for compact badge display
 const STAGE_WHO_SHORT = {
   parse: "Argon",
   search: "카카오 · OSM · Google",
@@ -67,7 +70,7 @@ const STAGE_WHO_SHORT = {
   judge: "Argon 판관",
 };
 
-// Evidence kind labels in Korean
+// Evidence category labels in Korean
 const KIND_KO = {
   route: "경로",
   kakao: "장소 대조",
@@ -80,7 +83,7 @@ const KIND_KO = {
   user_photo: "사용자 사진 대조",
 };
 
-// Evidence kind icon mapping
+// Evidence icon identifier mapping
 const KIND_ICON = {
   route: "route",
   kakao: "shop",
@@ -93,7 +96,7 @@ const KIND_ICON = {
   user_photo: "cam",
 };
 
-// Display priority for evidence kinds
+// Evidence sorting priority order
 const KIND_ORDER = [
   "user_photo",
   "vision",
@@ -115,27 +118,27 @@ const TYPE_KO = {
   point: "길 위 지점",
 };
 
-// Confidence rating labels in Korean
+// Confidence grade labels in Korean
 const CONF_KO = {
   high: "높음",
   medium: "보통",
   low: "낮음",
 };
 
-// Approximate confidence percentages for ring calculation
+// Confidence gauge visual percentage values
 const CONF_PCT = {
   high: 92,
   medium: 66,
   low: 35,
 };
 
-// Empty GeoJSON FeatureCollection
+// Empty GeoJSON FeatureCollection template
 const EMPTY = { type: "FeatureCollection", features: [] };
 
 // GeoJSON FeatureCollection constructor helper
 const FC = (features) => ({ type: "FeatureCollection", features: features || [] });
 
-// Narrow viewport detector
+// Viewport width breakpoint query helper
 const NARROW = () => window.matchMedia("(max-width: 1100px)").matches;
 
 // Four-step pipeline display definitions
@@ -146,13 +149,13 @@ const HOW = [
   ["판정", "Gemini 4 Argon"],
 ];
 
-// Regular expression to emphasize key spatial tokens
+// Regular expression to highlight spatial keywords and metrics
 const EMPH_RE = /('[^']{1,30}'|"[^"]{1,30}"|\d+(?:\.\d+)?\s?(?:m|km|층|초|번 출구)|맞은편|길 건너|옆|기준 랜드마크|기준 가게|간판|직진|확정|일치|건축물대장|경로)/g;
 
 // Default map venue coordinates
 const VENUE = [127.06370, 37.50680];
 
-// Audio meter configuration and state
+// Audio visualizer meter configuration and state
 const METER = {
   ctx: null,
   an: null,
@@ -163,10 +166,10 @@ const METER = {
   label: () => "듣는 중",
 };
 
-// Number of visualizer meter bars
+// Number of visualizer level bars
 const METER_BARS = 12;
 
-// SVG icon definitions
+// SVG icon path definitions
 const ICON = {
   pin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle>',
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>',
@@ -190,7 +193,7 @@ const ICON = {
   arrow: '<line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline>',
 };
 
-// DOM selector helper
+// DOM query selector shorthand
 const $ = (sel) => document.querySelector(sel);
 
 // Creates a DOM element with attributes and children
@@ -429,18 +432,7 @@ function animatePaths(cands) {
     if (!cands || cands.length === 0) return resolve();
     const topCand = cands.find((c) => c.rank === 1) || cands[0];
     const path = topCand.path;
-    if (!path || path.length < 2) {
-      const allLines = cands.filter((c) => c.path && c.path.length >= 2).map((c) => ({
-        type: "Feature",
-        properties: { rank: c.rank || 1 },
-        geometry: { type: "LineString", coordinates: c.path },
-      }));
-      const src = map && map.getSource("paths");
-      if (src) src.setData(FC(allLines));
-      return resolve();
-    }
-
-    if (document.hidden) {
+    if (!path || path.length < 2 || document.hidden) {
       const allLines = cands.filter((c) => c.path && c.path.length >= 2).map((c) => ({
         type: "Feature",
         properties: { rank: c.rank || 1 },
@@ -605,16 +597,26 @@ function setCands(cands, finalId, rise = false, vetoed = []) {
   });
 }
 
-// Plots confirmed green landmark markers along route
+// Plots confirmed landmark markers along search route
 function drawLandmarks(list) {
   if (!list) return;
   for (const item of list) {
-    if (!item.lnglat) continue;
-    const key = `${item.lnglat[0].toFixed(5)},${item.lnglat[1].toFixed(5)}`;
+    const d = item.data || item;
+    const lnglat = d.lnglat || item.lnglat;
+    if (!lnglat || item.supports === false) continue;
+    const key = `${lnglat[0].toFixed(5)},${lnglat[1].toFixed(5)}`;
     if (S.lmDrawn.has(key)) continue;
     S.lmDrawn.add(key);
-    marker(item.lnglat, "lm", "pin", item.name || "랜드마크", () => {
-      toast(item.name || "랜드마크");
+
+    const dist = d.distance_m ? ` ${d.distance_m}m` : "";
+    const label = `${d.place || "랜드마크"}${dist}`;
+    const isPhoto = item.kind === "user_photo";
+    const cls = isPhoto ? "lm photo" : "lm";
+    const icon = isPhoto ? "cam" : "check";
+
+    marker(lnglat, cls, icon, label, () => {
+      if (item.id) highlight(item.id);
+      else toast(label);
     });
   }
 }
@@ -649,8 +651,9 @@ function setBaselineVisible() {
     if (lineSrc) lineSrc.setData(EMPTY);
     return;
   }
+  const dist = bl.distance_to_result_m || 0;
   if (!S.baselineMarker) {
-    const text = `검증 없는 ${bl.model || "Gemini"} · 우리 답과 ${bl.distance_to_result_m || 0}m 차이`;
+    const text = `검증 없는 Gemini · 우리 답과 ${dist}m 차이`;
     S.baselineMarker = marker(bl.lnglat, "gem", "gem", text);
   }
   const top = S.resp.candidates && (S.resp.candidates.find((c) => c.rank === 1) || S.resp.candidates[0]);
@@ -668,14 +671,31 @@ function clearDecisionDrawing() {
   S.decisionMarkers = [];
   const src = map && map.getSource("final");
   if (src) src.setData(EMPTY);
+  const cones = map && map.getSource("cones");
+  if (cones) cones.setData(EMPTY);
 }
 
 // Positions verdict marker and flies camera into winning building
 function drawDecision(resp) {
   clearDecisionDrawing();
   const d = resp && resp.decision;
-  if (!d || !d.candidate_id) return;
-  const cand = (resp.candidates || []).find((c) => c.id === d.candidate_id);
+  if (!d) return;
+
+  const finalId = d.candidate_id;
+  const vetoed = d.vetoed || [];
+  setCands(resp.candidates, finalId, false, vetoed);
+
+  // Render vetoed candidate markers
+  for (const cid of vetoed) {
+    const c = (resp.candidates || []).find((x) => x.id === cid);
+    if (c && c.centroid) {
+      const why = c.veto_reason || "주용도 불일치";
+      const m = marker(c.centroid, "cand out", null, `${c.id} 제외 · ${why}`);
+      if (m) S.decisionMarkers.push(m);
+    }
+  }
+
+  const cand = (resp.candidates || []).find((c) => c.id === finalId);
   if (!cand || !cand.centroid) return;
 
   const m = marker(cand.entrance || cand.centroid, "result", "pin", cand.name || "목적지");
@@ -689,16 +709,53 @@ function drawDecision(resp) {
     }]));
   }
 
+  // Draw camera viewpoints and vision cones
+  const coneFeats = [];
+  const pGroups = photoGroups(resp.evidence || []);
+  for (const g of pGroups) {
+    if (g.pano && g.heading != null) {
+      const cm = camMarker(g.pano, () => openViewer(g));
+      if (cm) S.decisionMarkers.push(cm);
+      const s = sector(g.pano, g.heading);
+      if (s && s.coordinates) {
+        coneFeats.push({ type: "Feature", geometry: s });
+      }
+    }
+  }
+  for (const vp of cand.view_points || []) {
+    if (vp.lnglat && vp.heading != null) {
+      const cm = camMarker(vp.lnglat, () => {});
+      if (cm) S.decisionMarkers.push(cm);
+      const s = sector(vp.lnglat, vp.heading);
+      if (s && s.coordinates) {
+        coneFeats.push({ type: "Feature", geometry: s });
+      }
+    }
+  }
+  const conesSrc = map && map.getSource("cones");
+  if (conesSrc) conesSrc.setData(FC(coneFeats));
+
   setBaselineVisible();
 
-  map.flyTo({
-    center: cand.centroid,
-    zoom: Math.max(map.getZoom(), 17.4),
-    pitch: 58,
-    bearing: -24,
-    duration: 1800,
-    essential: true,
-  });
+  // Fit camera bounds around anchor and result
+  const fitCoords = [cand.centroid];
+  if (resp.anchor && resp.anchor.lnglat) fitCoords.push(resp.anchor.lnglat);
+  if (cand.path && cand.path.length > 0) fitCoords.push(...cand.path);
+  fit(fitCoords, 110, { pitch: 45, bearing: -17, duration: 1100 });
+
+  if (!document.hidden) {
+    setTimeout(() => {
+      if (document.hidden) return;
+      map.flyTo({
+        center: cand.centroid,
+        zoom: Math.max(map.getZoom(), 17.4),
+        pitch: 58,
+        bearing: -24,
+        duration: 1800,
+        essential: true,
+      });
+    }, 1700);
+  }
 }
 
 // Renders colored tokens in spoken text display
@@ -721,7 +778,7 @@ function renderSpans(input) {
     if (sp.start > cur) {
       spoken.appendChild(document.createTextNode(text.slice(cur, sp.start)));
     }
-    const cls = `s s-${sp.type || "step"}`;
+    const cls = `s s-${sp.kind || sp.type || "step"}`;
     const chunk = el("span", { class: cls }, text.slice(sp.start, sp.end));
     spoken.appendChild(chunk);
     cur = sp.end;
@@ -761,8 +818,7 @@ function stageSummary(stage, p, resp) {
     if (!d) return "판정 완료";
     if (d.question) return `되묻기: ${(d.question || {}).intent_ko || ""}`;
     const cand = (resp.candidates || []).find((c) => c.id === d.candidate_id);
-    const cName = cand ? cand.name || TYPE_KO[cand.type] || cand.id : "답 없음";
-    return `${cName} · 확신도 ${CONF_KO[d.confidence] || d.confidence}`;
+    return `${cand ? cand.name || TYPE_KO[cand.type] || cand.id : "답 없음"} · 확신도 ${CONF_KO[d.confidence] || d.confidence}`;
   }
   return "";
 }
@@ -853,9 +909,23 @@ function photoGroups(list) {
     if (e.kind !== "vision" && e.kind !== "user_photo") continue;
     const k = photoKey(e);
     if (!groups.has(k)) {
-      groups.set(k, { key: k, capture_date: e.capture_date, evs: [], data: e.data });
+      const d = e.data || {};
+      groups.set(k, {
+        key: k,
+        capture_date: e.capture_date,
+        image_b64: e.image_b64 || d.image_b64,
+        boxes: e.boxes || d.boxes || [],
+        candidate_id: e.candidate_id,
+        heading: d.heading,
+        pano: d.pano,
+        evs: [],
+        data: d,
+      });
     }
-    groups.get(k).evs.push(e);
+    const g = groups.get(k);
+    if (e.boxes && (!g.boxes || g.boxes.length === 0)) g.boxes = e.boxes;
+    if (e.image_b64 && !g.image_b64) g.image_b64 = e.image_b64;
+    g.evs.push(e);
   }
   return Array.from(groups.values());
 }
@@ -872,21 +942,51 @@ function isOld(capture) {
 // Generates image container with detection boxes
 function photoBox(g, big) {
   const box = el("div", { class: `photo ${big ? "big" : ""}` });
-  const desc = el("div", { class: "photo-desc" }, "거리 사진(모의 화면에는 넣지 않음) — 박스 위치만 표시");
-  box.appendChild(desc);
+  if (g.image_b64) {
+    const img = el("img", { src: `data:image/jpeg;base64,${g.image_b64}`, alt: "거리 사진" });
+    box.appendChild(img);
+  } else {
+    const desc = el("div", { class: "p-empty" }, "거리 사진(모의 화면에는 넣지 않음) — 박스 위치만 표시");
+    box.appendChild(desc);
+  }
+
+  // Overlay detected bounding boxes
+  for (const b of g.boxes || []) {
+    if (!b.box_2d) continue;
+    const [ymin, xmin, ymax, xmax] = b.box_2d;
+    const bDiv = el("div", {
+      class: `box ${b.name === "building" ? "bldg" : ""} ${b.status && b.status !== "present" ? "uncertain" : "present"}`,
+      style: {
+        top: `${ymin / 10}%`,
+        left: `${xmin / 10}%`,
+        height: `${(ymax - ymin) / 10}%`,
+        width: `${(xmax - xmin) / 10}%`,
+      },
+    });
+    const label = b.name === "building"
+      ? `건물${b.floors ? " " + b.floors + "층" : ""}`
+      : `${b.name || "표적"}${b.status && b.status !== "present" ? " · 불확실" : ""}`;
+    bDiv.appendChild(el("span", {}, label));
+    box.appendChild(bDiv);
+  }
+
+  if (g.capture_date) {
+    box.appendChild(el("div", { class: "p-cap" }, `촬영 ${g.capture_date}${isOld(g.capture_date) ? " · 5년 넘음" : ""}`));
+  }
   return box;
 }
 
 // Builds support / veto pill for an evidence item
 function verdictPill(e) {
   const sup = e.supports;
-  const cls = sup === true ? "v-ok" : sup === false ? "v-bad" : "v-info";
+  const cls = sup === true ? "v-ok" : sup === false ? "v-no" : "v-unk";
   const txt = sup === true ? "지지" : sup === false ? "반대" : "참고";
   return el("span", { class: `verdict ${cls}` }, txt);
 }
 
 // Constructs single evidence card element
 function evCard(e, opts = {}) {
+  const group = opts.group;
   const card = el("div", {
     id: `ev-${e.id}`,
     class: `ev k-${e.kind || "route"}`,
@@ -904,15 +1004,49 @@ function evCard(e, opts = {}) {
   const head = el("div", { class: "ev-head" }, ico, title, idBadge, verdictPill(e));
   const sum = el("div", { class: "ev-sum" }, e.summary_ko || "");
   const w = e.weight || 0;
+  const absW = Math.abs(w);
+  const wPct = Math.min(100, (absW / 3) * 100);
+
+  const wBar = el("div", { class: "wbar" },
+    el("i", { class: w >= 0 ? "pos" : "neg", style: { width: `${wPct}%` } })
+  );
   const meta = el("div", { class: "ev-meta" },
-    el("span", {}, `가중치 ${w > 0 ? "+" : ""}${w.toFixed(2)}`)
+    el("span", {}, `가중치 ${w > 0 ? "+" : ""}${w.toFixed(2)}`),
+    wBar
   );
   if (e.capture_date) {
-    meta.appendChild(el("span", {}, `촬영 ${e.capture_date}${isOld(e.capture_date) ? " (5년 넘음)" : ""}`));
+    const isStale = isOld(e.capture_date);
+    meta.appendChild(el("span", { class: isStale ? "stale" : "" }, `촬영 ${e.capture_date}${isStale ? " (5년 넘음)" : ""}`));
   }
   card.appendChild(head);
   card.appendChild(sum);
   card.appendChild(meta);
+
+  // Google Maps attribution link if present
+  const d = e.data || {};
+  if (d.maps_sources && Array.isArray(d.maps_sources)) {
+    const srcRow = el("div", { class: "ev-src" },
+      el("span", { translate: "no" }, "출처: Google 지도")
+    );
+    for (const src of d.maps_sources) {
+      srcRow.appendChild(el("a", { href: src.url || "#", target: "_blank", rel: "noreferrer", translate: "no" }, src.title || "Google 지도"));
+    }
+    card.appendChild(srcRow);
+  }
+
+  // Vision inspection action button
+  if (group || e.boxes || e.image_b64) {
+    const pBtn = el("button", {
+      class: "ev-photo-btn",
+      type: "button",
+      onclick: (ev) => {
+        ev.stopPropagation();
+        openViewer(group || { key: e.id, capture_date: e.capture_date, image_b64: e.image_b64, boxes: e.boxes, evs: [e], data: e.data });
+      },
+    }, svg("eye"), el("span", {}, "현장 사진 보기"));
+    card.appendChild(pBtn);
+  }
+
   return card;
 }
 
@@ -935,8 +1069,13 @@ function renderEvidence(list) {
     const ib = KIND_ORDER.indexOf(b.kind);
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
   });
+  const pGroups = photoGroups(list);
+  const groupMap = new Map();
+  for (const g of pGroups) {
+    for (const e of g.evs) groupMap.set(e.id, g);
+  }
   for (const e of sorted) {
-    box.appendChild(evCard(e));
+    box.appendChild(evCard(e, { group: groupMap.get(e.id) }));
   }
   const txt = `${list.length}건`;
   if (countEl) countEl.textContent = txt;
@@ -948,30 +1087,60 @@ function renderEvidence(list) {
 
 // Highlights targeted evidence card and moves view
 function highlight(id) {
-  const prev = document.querySelectorAll(".ev.on");
-  prev.forEach((item) => item.classList.remove("on"));
+  const prev = document.querySelectorAll(".ev.active");
+  prev.forEach((item) => item.classList.remove("active"));
   const card = document.getElementById(`ev-${id}`);
   if (card) {
-    card.classList.add("on");
+    card.classList.add("active");
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } else {
+    toast(`근거 ${id} 카드를 찾지 못함`);
   }
 }
 
 // Opens modal street view viewer
 function openViewer(g, opts = {}) {
   const v = $("#viewer");
-  if (!v) return;
+  if (!v || !g) return Promise.resolve();
   const meta = $("#viewerMeta");
+  const photoContainer = $("#viewerPhoto");
   const side = $("#viewerSide");
-  if (meta) meta.textContent = `촬영 ${g.capture_date || ""}${isOld(g.capture_date) ? " · 5년 넘음" : ""}`;
+
+  const isStale = isOld(g.capture_date);
+  if (meta) {
+    meta.textContent = `촬영 ${g.capture_date || ""}${isStale ? " · 5년 넘음 → 간판·색은 낮은 가중치" : ""}`;
+  }
+  if (photoContainer) {
+    photoContainer.innerHTML = "";
+    photoContainer.appendChild(photoBox(g, true));
+  }
   if (side) {
     side.innerHTML = "";
+    if (S.photoUrl || S.photo) {
+      const uphoto = el("div", { class: "uphoto" },
+        el("img", { src: S.photoUrl || S.photo, alt: "사용자 사진" }),
+        el("div", { class: "u-cap" }, "사용자 사진(최신 모습) — 거리 사진과 같은 건물인지 비교")
+      );
+      side.appendChild(uphoto);
+    }
+    const evCount = (g.evs || []).length;
+    side.appendChild(el("div", { class: "v-sum" }, `${evCount}가지를 사진에서 확인 · 1차 3.8 Flash 박스 → 2차 Flash-Lite 재확인`));
     for (const e of g.evs || []) {
-      side.appendChild(evCard(e));
+      side.appendChild(evCard(e, { group: g }));
     }
   }
+
   document.body.classList.add("viewing");
   v.hidden = false;
+
+  return new Promise((resolve) => {
+    S.viewerResolve = resolve;
+    if (opts.ms) {
+      setTimeout(() => {
+        closeViewer();
+      }, opts.ms);
+    }
+  });
 }
 
 // Closes modal street view viewer
@@ -979,6 +1148,11 @@ function closeViewer() {
   const v = $("#viewer");
   if (v) v.hidden = true;
   document.body.classList.remove("viewing");
+  if (S.viewerResolve) {
+    const fn = S.viewerResolve;
+    S.viewerResolve = null;
+    fn();
+  }
 }
 
 // Updates CSS variable for answer panel height
@@ -1016,6 +1190,14 @@ function runExample(ex) {
   const r = $("#region");
   if (t) t.value = ex.text || "";
   if (r) r.value = ex.region || "";
+
+  if (ex.needs_photo && !S.photo) {
+    document.body.classList.add("editing");
+    toast(ex.hint || "사진을 넣고 역할을 고른 뒤 찾기를 누르세요");
+    const pFile = $("#photoFile");
+    if (pFile) pFile.click();
+    return;
+  }
   runText(ex.text);
 }
 
@@ -1034,7 +1216,7 @@ function fitStrip(strip) {
 function renderIdle() {
   const ans = $("#answer");
   if (!ans) return;
-  ans.className = "panel";
+  ans.className = "panel a-idle";
   ans.innerHTML = "";
   const head = el("div", { class: "idle-head" }, "주소를 몰라도, 설명으로 찾습니다.");
   const cardsBox = el("div", { class: "ex-cards" });
@@ -1093,16 +1275,20 @@ function ring(conf, small = false) {
   const rad = 28;
   const circ = 2 * Math.PI * rad;
   const off = circ * (1 - pct / 100);
-  const wrap = el("div", { class: `ring ${small ? "sm" : ""}` });
+  const wrap = el("div", {
+    class: `ring ${small ? "sm" : ""}`,
+    title: "확신도 등급 — 확률이 아니라 1·2위 점수 차, 지지 근거 수, 완화 수로 정한 등급(높음·보통·낮음)",
+  });
+  const color = conf === "high" ? "var(--ok)" : conf === "medium" ? "var(--accent)" : "var(--bad)";
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   s.setAttribute("viewBox", "0 0 72 72");
   s.innerHTML = `
     <circle cx="36" cy="36" r="${rad}" fill="none" stroke="rgba(15,23,42,.08)" stroke-width="6"/>
-    <circle cx="36" cy="36" r="${rad}" fill="none" stroke="var(--brand)" stroke-width="6"
+    <circle cx="36" cy="36" r="${rad}" fill="none" stroke="${color}" stroke-width="6"
       stroke-dasharray="${circ}" stroke-dashoffset="${off}" stroke-linecap="round"/>
   `;
   wrap.appendChild(s);
-  wrap.appendChild(el("span", { class: "lbl" }, CONF_KO[conf] || conf));
+  wrap.appendChild(el("span", { class: "lbl" }, CONF_KO[conf] || "낮음"));
   return wrap;
 }
 
@@ -1148,10 +1334,10 @@ function chainStrip(resp, cand) {
   const sb = (resp && resp.signboard) || {};
   const names = sb.names ? sb.names.join(", ") : "";
   const chain = el("div", { class: "chain" });
-  if (S.photo) {
-    chain.appendChild(el("img", { src: S.photo }));
+  if (S.photoUrl || S.photo) {
+    chain.appendChild(el("img", { src: S.photoUrl || S.photo, alt: "사진 간판" }));
   }
-  chain.appendChild(el("span", { class: "node" }, `간판 '${names || "확인"}'`));
+  chain.appendChild(el("span", { class: "node" }, names ? `간판 '${names}'` : "간판을 못 읽음"));
   chain.appendChild(el("span", { class: "arrow" }, "→"));
   chain.appendChild(el("span", { class: "node teal" }, `${cand.name || "가게"} · 찾는 곳`));
   return chain;
@@ -1165,7 +1351,11 @@ function renderAnswer(resp) {
   ans.innerHTML = "";
   const d = resp && resp.decision;
   const cand = (resp.candidates || []).find((c) => c.id === (d && d.candidate_id)) || (resp.candidates && resp.candidates[0]);
-  if (!cand) return;
+  if (!cand) {
+    ans.appendChild(el("div", { class: "a-name" }, "위치를 정하지 못했어요. 대략 위치나 출발점을 더 알려 주세요."));
+    setAnswerHeight();
+    return;
+  }
 
   if (resp.signboard && resp.signboard.applied) {
     ans.appendChild(chainStrip(resp, cand));
@@ -1188,20 +1378,29 @@ function renderAnswer(resp) {
 
   const ringWrap = el("div", { class: "ringwrap" });
   ringWrap.appendChild(ring(d ? d.confidence : "medium", true));
-  ringWrap.appendChild(el("span", { class: "ring-cap" }, CONF_KO[d ? d.confidence : "medium"] || "확신도"));
+  ringWrap.appendChild(el("span", { class: "ring-cap" }, `확신도 ${CONF_KO[d ? d.confidence : "medium"] || "보통"}`));
   top.appendChild(main);
   top.appendChild(ringWrap);
   ans.appendChild(top);
 
-  const judgeChip = (resp.progress && resp.progress.find((p) => p.stage === "judge")?.features?.[0]) || "Gemini 4 Argon";
+  const judgeChip = (resp.progress && resp.progress.find((p) => p.stage === "judge")?.features?.[0]) || "Gemini 4 Argon 판관";
   const details = el("div", { class: "a-details" },
-    el("span", {}, `${TYPE_KO[cand.type] || "건물"} · ${cand.levels || 1}층 · OSM ${cand.osm_id || ""} · 판정 ${judgeChip.replace(" 판관", "")}`)
+    el("span", {}, `${TYPE_KO[cand.type] || "건물"} · ${cand.levels ? cand.levels + "층 · " : ""}OSM ${cand.osm_id || ""} · 판정 ${judgeChip.replace(" 판관", "")}`)
   );
+
+  // Show candidate rank change if previous answered decision shifted ranks
+  const ranks = rankMap(resp.candidates);
+  if (S.prevRanks && S.prevRanks[cand.id] && S.prevRanks[cand.id] !== ranks[cand.id]) {
+    details.appendChild(el("span", { class: "linkish", style: { marginLeft: "8px" } }, `답 반영 · ${S.prevRanks[cand.id]}위 → ${ranks[cand.id]}위`));
+  }
+  S.prevRanks = ranks;
+
   const more = (d && d.reasons && d.reasons.slice(1)) || [];
   const reasonsList = el("ul", { class: "a-reasons", hidden: true });
   if (more.length > 0) {
     const toggleBtn = el("button", {
       class: "linkish",
+      type: "button",
       onclick: () => {
         reasonsList.hidden = !reasonsList.hidden;
       },
@@ -1219,33 +1418,38 @@ function renderAnswer(resp) {
   ans.appendChild(details);
   ans.appendChild(reasonsList);
 
+  if (d && d.kind === "low_confidence" && d.alternatives && d.alternatives.length > 0) {
+    ans.appendChild(el("div", { class: "q-note", style: { marginTop: "6px" } }, `확신이 낮아요 · 다른 후보: ${d.alternatives.join(", ")}`));
+  }
+
   const nEv = (resp.evidence || []).length;
   const kakaoUrl = cand.centroid
     ? `https://map.kakao.com/link/roadview/${cand.centroid[1]},${cand.centroid[0]}`
     : "#";
   const actions = el("div", { class: "a-actions row" },
-    el("button", { class: "ghost", onclick: () => speak() }, svg("speaker"), el("span", {}, "듣기")),
-    el("button", { class: "ghost", onclick: () => copyShare(resp, cand) }, svg("copy"), el("span", {}, "복사")),
-    el("a", { class: "ghost", href: kakaoUrl, target: "_blank", rel: "noreferrer" }, svg("ext"), el("span", {}, "지금 모습")),
-    el("button", { class: "ghost", onclick: () => showPanel("evidence") }, `근거 ${nEv}건`)
+    el("button", { class: "ghost", type: "button", title: "음성으로 듣기", onclick: () => speak() }, svg("speaker"), el("span", {}, "듣기")),
+    el("button", { class: "ghost", type: "button", title: "카카오톡에 붙여 넣을 글 복사", onclick: () => copyShare(resp, cand) }, svg("copy"), el("span", {}, "복사")),
+    el("a", { class: "ghost", href: kakaoUrl, target: "_blank", rel: "noreferrer", title: "카카오 로드뷰로 지금 모습 보기(새 창)" }, svg("ext"), el("span", {}, "지금 모습")),
+    el("button", { class: "ghost", type: "button", onclick: () => showPanel("evidence") }, `근거 ${nEv}건`)
   );
   ans.appendChild(actions);
 
   if (resp.baseline && resp.baseline.lnglat) {
     const dist = resp.baseline.distance_to_result_m || 0;
+    const barW = Math.min(100, Math.max(4, 8 + dist / 6));
     const cmp = el("div", { class: "compare bars" },
       el("div", { class: "cmp-row" },
         el("b", { class: "us" }, "검증 있음"),
-        el("span", { class: "cmp-bar" }, el("i", { class: "us" })),
+        el("span", { class: "cmp-bar" }, el("i", { class: "us", style: { width: "4%" } })),
         el("span", { class: "cmp-v" }, "여기")
       ),
       el("div", { class: "cmp-row" },
         el("b", { class: "gem" }, `검증 없는 ${resp.baseline.model || "Gemini"}`),
-        el("span", { class: "cmp-bar" }, el("i", { class: "gem" })),
+        el("span", { class: "cmp-bar" }, el("i", { class: "gem", style: { width: `${barW}%` } })),
         el("span", { class: "cmp-v" }, `${dist}m 차이`)
       ),
-      el("div", { class: "cmp-note" },
-        `같은 Gemini가 지도·사진·대장 없이 안내 글만 보고 추측하면 우리 답에서 ${dist}m 떨어진 곳을 짚었어요`
+      el("div", { class: "cmp-note", title: `지도·사진·대장 없이 안내 글만 보고 추측한 곳: ${resp.baseline.address || "주소 없음"}` },
+        `같은 Gemini가 지도·사진·대장 없이 안내 글만 보고 추측하면 우리 답에서 ${dist}m 떨어진 곳을 짚었어요${resp.baseline.address ? " (" + resp.baseline.address + ")" : ""}`
       )
     );
     ans.appendChild(cmp);
@@ -1257,58 +1461,95 @@ function renderAnswer(resp) {
 function renderQuestion(resp) {
   const ans = $("#answer");
   if (!ans) return;
-  ans.className = "panel";
+  ans.className = "panel a-q";
   ans.innerHTML = "";
   const d = resp && resp.decision;
   const q = d && d.question;
   if (!q) return;
 
+  S.questionSource = q.source;
+
+  // Previous QA history notes
+  if (resp.notes && resp.notes.length > 0) {
+    const prevNotes = resp.notes.filter((n) => typeof n === "string" && n.startsWith("답 반영:"));
+    if (prevNotes.length > 0) {
+      const hist = el("div", { class: "q-hist" });
+      for (const n of prevNotes) {
+        hist.appendChild(el("div", { class: "q-prev" }, n));
+      }
+      ans.appendChild(hist);
+    }
+  }
+
   const qBox = el("div", { class: "a-q" });
   const head = el("div", { class: "q-head" },
     el("div", { class: "q-bubble" }, "?"),
     el("div", {},
-      el("div", { class: "q-text" }, q.text_ko || "추가 정보를 알려주세요"),
+      el("div", { class: "q-text" }, q.intent_ko || q.text_ko || "추가 정보를 알려주세요"),
       el("div", { class: "q-note" }, "확신이 낮을 때만 가장 많이 걸러 내는 질문 하나를 드려요.")
     )
   );
   qBox.appendChild(head);
 
-  if (q.options && q.options.length > 0) {
+  const opts = q.options_ko || q.options || [];
+  if (opts.length > 0) {
     const optsBox = el("div", { class: "q-opts" });
-    for (const opt of q.options) {
+    opts.forEach((opt, idx) => {
       optsBox.appendChild(el("button", {
         type: "button",
-        onclick: () => sendAnswer({ answer: opt }),
+        onclick: () => sendAnswer({ option_index: idx }),
       }, opt));
-    }
+    });
     qBox.appendChild(optsBox);
   }
 
   const inpRow = el("div", { class: "q-input" });
-  const inp = el("input", { placeholder: "직접 입력 (예: 삼성동 / 잠실새내역 4번 출구)" });
+  const placeholder = q.source === "name" ? "예: 명륜진사갈비" : "예: 삼성동 / 잠실새내역 4번 출구";
+  const inp = el("input", { placeholder });
   inp.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && inp.value.trim()) {
-      sendAnswer({ answer: inp.value.trim() });
+      sendAnswer({ text: inp.value.trim() });
     }
   });
   const subBtn = el("button", {
     type: "button",
     onclick: () => {
-      if (inp.value.trim()) sendAnswer({ answer: inp.value.trim() });
+      if (inp.value.trim()) sendAnswer({ text: inp.value.trim() });
     },
   }, "답하기");
   inpRow.appendChild(inp);
   inpRow.appendChild(subBtn);
   qBox.appendChild(inpRow);
 
+  const actionsRow = el("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "4px" } });
   const unknownBtn = el("button", {
     class: "ghost small",
     type: "button",
-    style: { alignSelf: "flex-start", marginTop: "4px" },
-    onclick: () => sendAnswer({ answer: "모르겠어요" }),
+    title: "모르면 지금 후보로 최선의 답을 보여줘요",
+    onclick: () => sendAnswer({ text: "모르겠어요" }),
   }, "모르겠어요");
-  qBox.appendChild(unknownBtn);
+  actionsRow.appendChild(unknownBtn);
 
+  if (q.source === "name" && !S.photo) {
+    const photoBtn = el("button", {
+      class: "ghost small q-photo",
+      type: "button",
+      onclick: () => {
+        const pf = $("#photoFile");
+        if (pf) pf.click();
+      },
+    }, "가게 사진이 있으면 간판을 읽어 찾아볼게요");
+    actionsRow.appendChild(photoBtn);
+  }
+
+  const speakBtn = el("button", {
+    class: "ghost small",
+    type: "button",
+    onclick: () => speak(q.intent_ko || q.text_ko),
+  }, "질문 듣기");
+  actionsRow.appendChild(speakBtn);
+
+  qBox.appendChild(actionsRow);
   ans.appendChild(qBox);
   setAnswerHeight();
 }
@@ -1363,20 +1604,18 @@ function copyShare(resp, cand) {
 }
 
 // Reads aloud verbal decision summary
-function speak() {
+function speak(customText) {
   if (S.mock) {
     toast("모의 화면에서는 음성을 만들지 않아요.");
     return;
   }
-  const text = (S.resp && S.resp.tts_text) || (S.resp && S.resp.decision && S.resp.decision.reasons?.[0]?.text_ko);
+  const text = customText || (S.resp && S.resp.tts_text) || (S.resp && S.resp.decision && S.resp.decision.reasons?.[0]?.text_ko);
   if (!text) return;
-  try {
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "ko-KR";
-    window.speechSynthesis.speak(u);
-  } catch (e) {
+  const url = `/api/tts?text=${encodeURIComponent(text)}`;
+  const audio = new Audio(url);
+  audio.play().catch((e) => {
     toast(`재생 실패: ${e.message}`);
-  }
+  });
 }
 
 // Coordinates smooth arrival sequence to verdict
@@ -1385,6 +1624,8 @@ function reveal(resp) {
   const safetyTimer = setTimeout(() => {
     if (!done) {
       done = true;
+      drawDecision(resp);
+      document.body.classList.remove("show-timeline", "show-evidence");
       if (resp.decision && resp.decision.kind === "question") {
         setState("asking");
         renderQuestion(resp);
@@ -1392,6 +1633,7 @@ function reveal(resp) {
         setState("answered");
         renderAnswer(resp);
       }
+      renderSafeguards(resp.safeguards);
     }
   }, 5000);
 
@@ -1399,13 +1641,23 @@ function reveal(resp) {
   const top = cands.find((c) => c.rank === 1) || cands[0];
   const finalId = resp.decision && resp.decision.candidate_id;
 
-  animatePaths(cands)
-    .then(() => setCands(cands, finalId, true, (resp.decision && resp.decision.vetoed) || []))
+  (S.walk || Promise.resolve())
+    .then(async () => {
+      if (done) return;
+      // Auto-preview up to 2 street view groups if tab is visible
+      if (!document.hidden && resp.decision && resp.decision.kind !== "question") {
+        const pGroups = photoGroups(resp.evidence || []);
+        for (const g of pGroups.slice(0, 2)) {
+          await openViewer(g, { ms: 2800 });
+        }
+      }
+    })
     .then(() => {
       clearTimeout(safetyTimer);
       if (done) return;
       done = true;
       drawDecision(resp);
+      document.body.classList.remove("show-timeline", "show-evidence");
       if (resp.decision && resp.decision.kind === "question") {
         setState("asking");
         renderQuestion(resp);
@@ -1413,27 +1665,46 @@ function reveal(resp) {
         setState("answered");
         renderAnswer(resp);
       }
+      renderSafeguards(resp.safeguards);
     });
 }
 
 // Updates map elements according to search result
 function drawMap(resp) {
   if (!resp) return;
-  if (resp.window) drawWindow(resp.window);
-  if (resp.anchor && resp.anchor.lnglat) {
-    const key = `anchor_${resp.anchor.lnglat.join(",")}`;
-    if (!S.drawn.has(key)) {
-      S.drawn.add(key);
-      marker(resp.anchor.lnglat, "anchor", "pin", resp.anchor.name || "기준점");
+  if (resp.window && !S.drawn.has("window")) {
+    S.drawn.add("window");
+    drawWindow(resp.window);
+  }
+  if (resp.anchor && resp.anchor.lnglat && !S.drawn.has("anchor")) {
+    S.drawn.add("anchor");
+    marker(resp.anchor.lnglat, "anchor", "pin", resp.anchor.name || "기준점");
+    if (!resp.candidates || resp.candidates.length === 0) {
+      map.flyTo({ center: resp.anchor.lnglat, zoom: 16, duration: 900 });
     }
+  }
+  if (resp.candidates && resp.candidates.length > 0 && !S.drawn.has("paths")) {
+    S.drawn.add("paths");
+    S.walk = animatePaths(resp.candidates);
+  }
+  if (resp.candidates && resp.candidates.length > 0 && !S.drawn.has("cands")) {
+    S.drawn.add("cands");
+    (S.walk || Promise.resolve()).then(() => drawCands(resp.candidates, resp));
+  }
+  if (resp.evidence && resp.evidence.length > 0) {
+    drawLandmarks(resp.evidence);
   }
   if (resp.places && resp.places.length > 0) {
     drawLandmarks(resp.places);
+    const pAttr = $("#placesAttr");
+    if (pAttr) {
+      pAttr.hidden = false;
+      pAttr.textContent = ` · 장소 자료: 카카오 ${resp.places.length}곳(이번 검색)`;
+    }
   }
-  if (resp.candidates && resp.candidates.length > 0) {
-    const finalId = resp.decision && resp.decision.candidate_id;
-    setCands(resp.candidates, finalId, false, (resp.decision && resp.decision.vetoed) || []);
-    drawCands(resp.candidates, resp);
+  if (resp.decision && !S.drawn.has("decision")) {
+    S.drawn.add("decision");
+    reveal(resp);
   }
 }
 
@@ -1444,6 +1715,8 @@ function renderSignboard(resp) {
   const names = sb.names ? sb.names.join(", ") : "";
   if (names) {
     toast(`간판: ${names}${sb.applied ? " → 지도 검색" : ""}`);
+  } else if (sb.attempted) {
+    toast("간판을 읽지 못했어요 — 닮음 대조만");
   }
 }
 
@@ -1508,18 +1781,35 @@ function renderBadge(resp) {
 
 // Central render dispatcher for pipeline state updates
 function render(resp) {
+  if (!resp) return;
+
+  // Filter out duplicate decision during active re-query
+  if (S.answeredDecision && resp.decision && JSON.stringify(resp.decision) === S.answeredDecision) {
+    resp = { ...resp, decision: null, done: false };
+  } else if (resp.decision) {
+    S.answeredDecision = null;
+  }
+
   S.resp = resp;
   renderSpans(resp.input);
+  renderBadge(resp);
   renderTimeline(resp);
   renderEvidence(resp.evidence);
-  renderBadge(resp);
-  drawMap(resp);
   renderSignboard(resp);
-  if (!resp.done) {
+
+  if (resp.error) {
+    showError(`처리 실패: ${resp.error}`);
+    setBusy(false);
+    return;
+  }
+
+  if (window.map) {
+    drawMap(resp);
+  }
+
+  if (!resp.decision) {
     setState("running");
     renderRunning(resp);
-  } else {
-    reveal(resp);
   }
 }
 
@@ -1560,7 +1850,7 @@ function setBusy(on) {
 // Polls session status endpoint
 function poll() {
   if (!S.sid) return;
-  fetch(`/api/session/${S.sid}`)
+  fetch(`/api/session/${S.sid}`, { cache: "no-store" })
     .then((r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return r.json();
@@ -1570,6 +1860,11 @@ function poll() {
       if (data.done) {
         stopPolling();
         setBusy(false);
+        if (data.decision) {
+          S.lastSid = S.sid;
+          const replay = $("#replayBtn");
+          if (replay) replay.hidden = false;
+        }
       }
     })
     .catch((e) => {
@@ -1582,7 +1877,8 @@ function poll() {
 // Begins periodic polling timer
 function startPolling() {
   stopPolling();
-  S.timer = setInterval(poll, 800);
+  poll();
+  S.timer = setInterval(poll, 700);
 }
 
 // Cancels active polling timer
@@ -1612,28 +1908,60 @@ function post(url, init = {}) {
 function runText(text) {
   const query = text || ($("#text") && $("#text").value.trim());
   if (!query && !S.photo) {
-    toast("길 설명을 적거나 사진을 넣어 주세요.");
+    showError("길 설명을 적거나 사진을 넣어 주세요.");
     return;
   }
-  clearMap();
+  resetAll();
   setBusy(true);
   setState("running");
   renderRunning({ progress: [{ stage: "parse", status: "running" }] });
 
+  const regionVal = $("#region") ? $("#region").value.trim() : null;
+
+  // Use multipart endpoint when a photo is attached
+  if (S.photo) {
+    const fd = new FormData();
+    fd.append("text", query || "");
+    if (regionVal) fd.append("region", regionVal);
+    if (S.here) {
+      fd.append("lat", String(S.here[1]));
+      fd.append("lng", String(S.here[0]));
+    }
+    fd.append("photo", S.photo);
+    fd.append("photo_role", (!query && S.photo) ? "target" : S.photoRole);
+
+    fetch("/api/locate", { method: "POST", body: fd })
+      .then(async (r) => {
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        return r.json();
+      })
+      .then((resp) => {
+        S.sid = resp.session_id;
+        startPolling();
+      })
+      .catch((e) => {
+        showError(`요청 실패: ${e.message}`);
+        setBusy(false);
+        setState("idle");
+      });
+    return;
+  }
+
+  // Use JSON text query endpoint
   const body = {
     text: query,
-    region: $("#region") ? $("#region").value.trim() : null,
-    here: S.here,
-    photo: S.photo,
-    photo_role: S.photoRole,
+    region: regionVal,
+    lat: S.here ? S.here[1] : null,
+    lng: S.here ? S.here[0] : null,
   };
 
-  post("/api/locate", { body: JSON.stringify(body) })
+  post("/api/locate_text", { body: JSON.stringify(body) })
     .then((resp) => {
       S.sid = resp.session_id;
-      render(resp);
-      if (!resp.done) startPolling();
-      else setBusy(false);
+      startPolling();
     })
     .catch((e) => {
       showError(`요청 실패: ${e.message}`);
@@ -1644,23 +1972,33 @@ function runText(text) {
 
 // Uploads recorded audio sample for voice query
 function sendAudio(blob) {
+  resetAll();
   setBusy(true);
   setState("running");
   const form = new FormData();
-  form.append("audio", blob, "record.webm");
-  if ($("#region") && $("#region").value.trim()) {
-    form.append("region", $("#region").value.trim());
+  form.append("audio", blob, "voice.webm");
+  const regionVal = $("#region") ? $("#region").value.trim() : "";
+  if (regionVal) form.append("region", regionVal);
+  if (S.here) {
+    form.append("lat", String(S.here[1]));
+    form.append("lng", String(S.here[0]));
   }
+  if (S.photo) {
+    form.append("photo", S.photo);
+    form.append("photo_role", S.photoRole);
+  }
+
   fetch("/api/locate", { method: "POST", body: form })
-    .then((r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    .then(async (r) => {
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${r.status}`);
+      }
       return r.json();
     })
     .then((resp) => {
       S.sid = resp.session_id;
-      render(resp);
-      if (!resp.done) startPolling();
-      else setBusy(false);
+      startPolling();
     })
     .catch((e) => {
       showError(`녹음 보내기 실패: ${e.message}`);
@@ -1678,12 +2016,27 @@ function sendAnswer(body) {
   if (S.resp && S.resp.decision) {
     S.answeredDecision = JSON.stringify(S.resp.decision);
   }
-  setState("running");
-  renderRunning({ progress: [{ stage: "parse", status: "running", sub: "답 반영 중" }] });
-  post(`/api/answer/${S.sid}`, { body: JSON.stringify(body) })
+
+  const src = S.questionSource || (S.resp && S.resp.decision && S.resp.decision.question && S.resp.decision.question.source);
+  const restartStages = ["region", "station", "anchor", "name"];
+
+  if (restartStages.includes(src)) {
+    const curSid = S.sid;
+    resetAll();
+    S.sid = curSid;
+    setState("running");
+    renderRunning({ progress: [{ stage: "parse", status: "running", sub: "답 반영 중" }] });
+  } else {
+    S.drawn.delete("decision");
+    clearDecisionDrawing();
+    setState("running");
+    renderRunning({ progress: [{ stage: "judge", status: "running", sub: "답 반영 중" }] });
+  }
+
+  post("/api/answer", { body: JSON.stringify({ session_id: S.sid, ...body }) })
     .then((resp) => {
-      render(resp);
-      if (!resp.done) startPolling();
+      if (resp.session_id) S.sid = resp.session_id;
+      startPolling();
     })
     .catch((e) => {
       showError(`답 보내기 실패: ${e.message}`);
@@ -1779,7 +2132,6 @@ function runMock() {
       return r.json();
     })
     .then((full) => {
-      const stages = ["parse", "search", "verify", "judge"];
       let step = 0;
       function next() {
         step++;
@@ -1809,14 +2161,17 @@ function runMock() {
 
 // Queries model warmup status
 function pollWarm() {
+  const b = $("#warmBadge");
   fetch("/api/warmup")
     .then((r) => r.json())
     .then((d) => {
-      const b = $("#warmBadge");
       if (!b) return;
       b.hidden = false;
       const s = d.seconds ? d.seconds.toFixed(1) : "4.9";
       b.textContent = `모델 예열 완료 · ${s}초 · ${d.backend || "Vertex AI"}`;
+      if (d.state === "running" || d.state === "warming") {
+        setTimeout(pollWarm, 2000);
+      }
     })
     .catch(() => {});
 }
@@ -1832,7 +2187,7 @@ function loadChips() {
         box.innerHTML = "";
         for (const ex of list) {
           const btn = el("button", {
-            class: "ghost small",
+            class: "chip",
             type: "button",
             onclick: () => runExample(ex),
           }, ex.label || ex.text.slice(0, 10));
@@ -2056,7 +2411,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Register interactive click handlers
   const warmBadge = $("#warmBadge");
-  if (warmBadge) warmBadge.addEventListener("click", pollWarm);
+  if (warmBadge) {
+    warmBadge.addEventListener("click", () => {
+      post("/api/warmup").then(() => pollWarm()).catch(() => pollWarm());
+    });
+  }
 
   const runBtn = $("#run");
   if (runBtn) runBtn.addEventListener("click", () => runText());
@@ -2118,15 +2477,12 @@ document.addEventListener("DOMContentLoaded", () => {
     photoFile.addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        S.photo = ev.target.result;
-        const chip = $("#photoChip");
-        const thumb = $("#photoThumb");
-        if (chip) chip.hidden = false;
-        if (thumb) thumb.src = S.photo;
-      };
-      reader.readAsDataURL(file);
+      S.photo = file;
+      S.photoUrl = URL.createObjectURL(file);
+      const chip = $("#photoChip");
+      const thumb = $("#photoThumb");
+      if (chip) chip.hidden = false;
+      if (thumb) thumb.src = S.photoUrl;
     });
   }
 
@@ -2134,6 +2490,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (photoClear) {
     photoClear.addEventListener("click", () => {
       S.photo = null;
+      if (S.photoUrl) {
+        URL.revokeObjectURL(S.photoUrl);
+        S.photoUrl = null;
+      }
       if (photoFile) photoFile.value = "";
       const chip = $("#photoChip");
       if (chip) chip.hidden = true;
