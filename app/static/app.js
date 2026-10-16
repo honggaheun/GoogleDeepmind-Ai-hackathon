@@ -2839,3 +2839,8 @@ document.addEventListener("DOMContentLoaded", () => {
     runMock();
   }
 });
+
+window.S = S;
+window.startPolling = startPolling;
+window.showError = showError;
+
