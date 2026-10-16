@@ -1,0 +1,120 @@
+[
+  {
+    "id": "venue",
+    "text": "지하철 2호선 삼성역 3번 출구 하차 후 직진, 오토웨이 타워",
+    "region": null,
+    "expect_way": 475633202,
+    "tolerance_m": 30,
+    "expect_kind": "named_place",
+    "note": "Station exit, walk straight, named building"
+  },
+  {
+    "id": "venue_en",
+    "text": "Get off at Samseong Station exit 3 on line 2, walk straight, and you will see Autoway Tower",
+    "region": null,
+    "expect_way": 475633202,
+    "tolerance_m": 30,
+    "expect_kind": "named_place"
+  },
+  {
+    "id": "emergency_kyobo",
+    "text": "사람이 쓰러졌어요! 여기 강남역 11번 출구로 나와서 직진하면 왼쪽에 교보문고 건물 있잖아요, 그 건물 앞이에요",
+    "region": null,
+    "expect_way": 541900101,
+    "tolerance_m": 30,
+    "expect_kind": "named_place",
+    "note": "Emergency call phrasing with a named building"
+  },
+  {
+    "id": "elder_starbucks",
+    "text": "지금 봉은사역 1번 출구에서 직진하다가 왼쪽에 스타벅스 있는 건물 앞인데 어르신이 넘어지셨어요",
+    "region": "삼성동",
+    "expect_name": "스타벅스 봉은사역점",
+    "expect_way": null,
+    "tolerance_m": 40,
+    "expect_kind": "named_place",
+    "note": "Chain store: the branch on the walked route"
+  },
+  {
+    "id": "kyobo_plain",
+    "text": "강남역 11번 출구에서 나와 직진하면 왼쪽에 있는 교보문고 건물",
+    "region": null,
+    "expect_way": 541900101,
+    "tolerance_m": 30,
+    "expect_kind": "named_place"
+  },
+  {
+    "id": "hongdae_cafe",
+    "text": "홍대입구역 9번 출구로 나와서 직진하다가 두 번째 골목으로 좌회전하면 왼쪽에 있는 카페",
+    "region": "마포구",
+    "expect_way": 612473489,
+    "tolerance_m": 40,
+    "expect_kind": "building",
+    "note": "Category target after an ordinal alley turn"
+  },
+  {
+    "id": "munjeong_photo_landmark",
+    "text": "송파구에 한림예고 쪽에서 직진하면 돈가스 파는 집 하나있는데 거기 맞은편 고기집",
+    "region": null,
+    "photo": "합성 간판 '동촌 아귀찜 · 황태 낙지찜'",
+    "photo_role": "landmark",
+    "expect_way": 1266001014,
+    "expect_name": "저팔계 문정3호점",
+    "tolerance_m": 30,
+    "expect_kind": "building",
+    "note": "Without the photo a clarifying question is expected"
+  },
+  {
+    "id": "munjeong_photo_target",
+    "text": "송파구 한림예고 쪽에서 직진하면 나오는 이 가게",
+    "region": null,
+    "photo": "합성 간판",
+    "photo_role": "target",
+    "expect_way": 1020455597,
+    "expect_name": "동촌 본점",
+    "tolerance_m": 30,
+    "expect_kind": "named_place"
+  },
+  {
+    "id": "photo_only",
+    "text": "",
+    "region": "송파구",
+    "photo": "합성 간판",
+    "photo_role": "target",
+    "expect_name": "동촌",
+    "expect_way": null,
+    "tolerance_m": 40,
+    "expect_kind": "named_place"
+  },
+  {
+    "id": "samseong_alley",
+    "text": "삼성역 4번 출구로 나와서 직진하다가 두 번째 골목으로 우회전하면 나오는 골목",
+    "region": null,
+    "expect_name": "테헤란로92길",
+    "expect_way": null,
+    "tolerance_m": 40,
+    "expect_kind": "alley",
+    "note": "Alley target after an ordinal turn"
+  },
+  {
+    "id": "busan_seomyeon",
+    "text": "부산 서면역 7번 출구로 나와서 쭉 가면 롯데백화점 건너편 건물",
+    "region": null,
+    "expect_way": null,
+    "tolerance_m": 60,
+    "expect_kind": "building",
+    "expect_question": true,
+    "answer_if_asked": "모르겠어요",
+    "note": "Several candidates; a floor-count question is expected"
+  },
+  {
+    "id": "bongeunsa_starbucks_building",
+    "text": "봉은사역 1번 출구에서 직진하다가 왼쪽에 스타벅스 있는 건물",
+    "region": "삼성동",
+    "expect_name": "스타벅스 봉은사역점",
+    "expect_way": null,
+    "tolerance_m": 40,
+    "expect_kind": "named_place",
+    "note": "Chain store building on the walked route"
+  }
+]
