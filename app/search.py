@@ -610,23 +610,27 @@ def _landmark_anchors(landmarks: list, window: Window | None, budget: _Budget) -
     return anchors
 
 
-def en_resolve(*args, **kwargs) -> list[Place]:
+def en_resolve(
+    budget: _Budget,
+    query: str,
+    center: LatLng | None = None,
+    radius_m: int = 1000,
+    **kwargs: Any,
+) -> list[Place]:
     """Resolve an English place name to Korean places via 2-turn Gemini tool calling."""
-    if args and isinstance(args[0], _Budget):
-        budget = args[0]
-        query = args[1] if len(args) > 1 else kwargs.get("query") or kwargs.get("name", "")
-        center = args[2] if len(args) > 2 else kwargs.get("center") or kwargs.get("near")
-        radius_m = args[3] if len(args) > 3 else kwargs.get("radius_m", 1000)
-    else:
-        query = args[0] if args else kwargs.get("name") or kwargs.get("query", "")
-        center = args[1] if len(args) > 1 else kwargs.get("near") or kwargs.get("center")
-        radius_m = args[2] if len(args) > 2 else kwargs.get("radius_m", 1000)
-        budget = args[3] if len(args) > 3 else kwargs.get("budget")
-        if isinstance(radius_m, _Budget):
-            budget = radius_m
-            radius_m = 1000
-        if budget is None:
+    if not isinstance(budget, _Budget):
+        if isinstance(query, _Budget):
+            budget, query = query, str(budget)
+        else:
+            query = str(budget)
             budget = _Budget()
+
+    query = str(query or "").strip()
+    if not query:
+        return []
+
+    if not any(c.isascii() and c.isalpha() for c in query):
+        return _kw(budget, query, near=center, radius_m=radius_m)
 
     try:
         tool_decl = types.Tool(
@@ -651,25 +655,51 @@ def en_resolve(*args, **kwargs) -> list[Place]:
             timeout_ms=GROUND_TIMEOUT_MS,
         )
         if resp1 is None:
-            return []
+            return _kw(budget, query, near=center, radius_m=radius_m)
 
         fn_call = None
-        if getattr(resp1, "function_calls", None):
-            fn_call = resp1.function_calls[0]
-        elif hasattr(resp1, "candidates") and resp1.candidates:
-            content = getattr(resp1.candidates[0], "content", None)
-            for part in (getattr(content, "parts", None) or []):
-                if hasattr(part, "function_call") and part.function_call:
-                    fn_call = part.function_call
+        candidates = getattr(resp1, "candidates", None)
+        if candidates and isinstance(candidates, (list, tuple)):
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                parts = getattr(content, "parts", None)
+                if parts and isinstance(parts, (list, tuple)):
+                    for part in parts:
+                        fc = getattr(part, "function_call", None)
+                        if fc is not None:
+                            fn_name = getattr(fc, "name", None)
+                            if fn_name and isinstance(fn_name, str):
+                                fn_call = fc
+                                break
+                if fn_call is not None:
                     break
 
         if fn_call is None:
+            fcs = getattr(resp1, "function_calls", None)
+            if fcs and not isinstance(fcs, MagicMock) and len(fcs) > 0:
+                fn_call = fcs[0]
+
+        k_query = None
+        if fn_call is not None:
+            f_args = getattr(fn_call, "args", None)
+            if isinstance(f_args, dict):
+                k_query = f_args.get("query") or f_args.get("name") or f_args.get("keyword")
+            elif f_args is not None:
+                val = getattr(f_args, "query", None)
+                if isinstance(val, str):
+                    k_query = val
+                elif hasattr(f_args, "get"):
+                    val = f_args.get("query")
+                    if isinstance(val, str):
+                        k_query = val
+
+        if not k_query:
             budget.notes.append("Gemini tool call missing")
             return _kw(budget, query, near=center, radius_m=radius_m)
 
-        f_args = getattr(fn_call, "args", None) or {}
-        k_query = f_args.get("query") or f_args.get("name") or f_args.get("keyword") or query
         places = _kw(budget, k_query, near=center, radius_m=radius_m)
+        if not places and k_query != query:
+            places = _kw(budget, query, near=center, radius_m=radius_m)
 
         try:
             resp2 = llm.generate_tools(
@@ -694,10 +724,15 @@ def en_resolve(*args, **kwargs) -> list[Place]:
             if resp2 and hasattr(resp2, "candidates") and resp2.candidates:
                 g_meta = getattr(resp2.candidates[0], "grounding_metadata", None)
                 if g_meta and hasattr(g_meta, "grounding_chunks"):
-                    for chunk in g_meta.grounding_chunks or []:
-                        web = getattr(chunk, "web", None) or getattr(chunk, "maps", None)
-                        if web:
-                            budget.maps_sources.append({"title": getattr(web, "title", ""), "uri": getattr(web, "uri", "")})
+                    chunks = getattr(g_meta, "grounding_chunks", None)
+                    if chunks and isinstance(chunks, (list, tuple)):
+                        for chunk in chunks:
+                            web = getattr(chunk, "web", None) or getattr(chunk, "maps", None)
+                            if web is not None:
+                                title = getattr(web, "title", None)
+                                uri = getattr(web, "uri", None)
+                                if isinstance(title, str) and isinstance(uri, str):
+                                    budget.maps_sources.append({"title": title, "uri": uri})
         except Exception:
             pass
 
@@ -722,8 +757,9 @@ def resolve_anchors(
     evidence = anchor.get("evidence", "")
 
     # English query resolution
-    if (pr.language == "en" or re.search(r"[A-Za-z]{3,}", query)) and kind == "place":
-        places = en_resolve(b, query, window.center if window else config.VENUE, window.radius_m if window else 1000)
+    anchor_str = query or evidence
+    if anchor_str and (pr.language == "en" or re.search(r"[A-Za-z]{2,}", anchor_str)):
+        places = en_resolve(b, anchor_str, window.center if window else config.VENUE, window.radius_m if window else 1000)
         if places:
             return [Anchor(name=p.name, at=p.at, source="kakao") for p in places[:3]], None
 
