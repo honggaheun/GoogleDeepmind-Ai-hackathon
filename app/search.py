@@ -1030,7 +1030,7 @@ def _turn(
     after_ref = cf.split(":", 1)[1] if cf.startswith("after:") else None
 
     # Collect branches along the straight road from seg_start
-    road_walk = _walk(md, dataclasses.replace(p, node=p.nodes[p.seg_start]), 1000.0)
+    road_walk = _walk(md, dataclasses.replace(p, nodes=p.nodes[: p.seg_start + 1]), 1000.0)
     road_nodes = [p.nodes[p.seg_start]] + [item[0] for item in road_walk]
 
     branches = []
@@ -1922,34 +1922,70 @@ def _category_candidates(
 
 def _relation_and_target_evidence(
     md: mapdata.MapData,
-    cand: Candidate,
-    lspot: Place | LatLng | None,
-    target_spots: list[Place] | None,
-    relation: str,
+    arg2: Any,
+    arg3: Any = None,
+    arg4: Any = None,
+    arg5: Any = None,
+    *,
+    target_spots: list[Place] | None = None,
 ) -> list[Evidence]:
     """Verify geometric relation and presence of target business at candidate building."""
+    if isinstance(arg2, ParseResult):
+        pr = arg2
+        cand = arg3
+        la = arg4
+        target_info = pr.raw.get("target") or {}
+        relation = target_info.get("relation", "across")
+        tgt_ref = target_info.get("relative_to")
+        lspot = None
+        if isinstance(la, dict):
+            if tgt_ref and tgt_ref in la and la[tgt_ref]:
+                lspot = la[tgt_ref][0]
+            if target_spots is None:
+                target_spots = la.get("__target__")
+        elif isinstance(la, (Place, LatLng)):
+            lspot = la
+        if target_spots is None and isinstance(arg5, list):
+            target_spots = arg5
+    else:
+        cand = arg2
+        lspot = arg3
+        if target_spots is None and isinstance(arg4, list):
+            target_spots = arg4
+        relation = arg5 if isinstance(arg5, str) else (arg4 if isinstance(arg4, str) else "across")
+
     evs = []
     if lspot is not None:
         l_at = lspot.at if isinstance(lspot, Place) else lspot
-        ok, dist, crossed = relation_ok(md, l_at, cand.centroid, relation)
-        ev_rel = Evidence(
-            id=f"E-rel-{cand.id}",
-            kind="relation",
-            candidate_id=cand.id,
-            supports=ok,
-            summary_ko=f"{getattr(lspot, 'name', '기준점')} {relation} 확인 ({int(dist)}m)",
-            data={"relation_ok": ok, "lnglat": [round(l_at.lng, 7), round(l_at.lat, 7)]},
-        )
-        evs.append(ev_rel)
+        c_at = cand.centroid if cand.centroid and (cand.centroid.lat != 0 or cand.centroid.lng != 0) else None
+        b_way = cand.osm_id or getattr(cand, "building_way_id", None)
+        if c_at is None and b_way and b_way in md.buildings:
+            c_at = md.buildings[b_way].centroid
+        if c_at:
+            ok, dist, crossed = relation_ok(md, l_at, c_at, relation)
+            ev_rel = Evidence(
+                id=f"E-rel-{cand.id}",
+                kind="relation",
+                candidate_id=cand.id,
+                supports=ok,
+                summary_ko=f"{getattr(lspot, 'name', '기준점')} {relation} 확인 ({int(dist)}m)",
+                data={"relation_ok": ok, "lnglat": [round(l_at.lng, 7), round(l_at.lat, 7)]},
+            )
+            evs.append(ev_rel)
 
     if target_spots:
         found_target = False
         target_name = ""
+        b_way = cand.osm_id or getattr(cand, "building_way_id", None)
         for spot in target_spots:
             owner = _owner_way(md, spot.at)
-            d = geo.dist_m(cand.centroid, spot.at) if cand.centroid else 9999.0
-            b_way = getattr(cand, "building_way_id", None)
-            if (owner and (owner.way_id == cand.osm_id or (b_way and owner.way_id == b_way))) or d <= TARGET_BUILDING_M:
+            d = 9999.0
+            if cand.centroid and (cand.centroid.lat != 0 or cand.centroid.lng != 0):
+                d = geo.dist_m(cand.centroid, spot.at)
+            elif b_way and b_way in md.buildings:
+                d = geo.dist_m(md.buildings[b_way].centroid, spot.at)
+
+            if (owner and (owner.way_id == b_way)) or d <= TARGET_BUILDING_M:
                 found_target = True
                 target_name = spot.name
                 break
