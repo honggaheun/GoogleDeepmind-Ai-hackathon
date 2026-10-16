@@ -1,0 +1,10 @@
+.venv/
+data/
+cache/
+logs/
+tests/
+**/__pycache__/
+*.sqlite
+*.jsonl
+.git/
+deploy/
