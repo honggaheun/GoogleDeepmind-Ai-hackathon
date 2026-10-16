@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import re
@@ -637,7 +638,7 @@ def judge_with_gemini(
 ) -> dict:
     """Call the Gemini judge model chain with structured output and no timeout retries."""
     contents = judge_contents(pr, cands, ev, scores, photo=photo, photo_role=photo_role)
-    out, model_label = llm.generate_json_chain(
+    raw_out = llm.generate_json_chain(
         "judge",
         [config.MODEL_JUDGE, config.MODEL_MAIN],
         contents,
@@ -647,6 +648,15 @@ def judge_with_gemini(
         timeout_ms=JUDGE_TIMEOUT_MS,
         retry_timeouts=False,
     )
+    if isinstance(raw_out, tuple) and len(raw_out) == 2:
+        out, model_id = raw_out
+    else:
+        out = raw_out
+        model_id = next(
+            (u.get("model") for u in reversed(llm.usage()) if u.get("stage") == "judge" and not u.get("wasted")),
+            config.MODEL_JUDGE,
+        )
+    model_label = config.label(model_id) if hasattr(config, "label") else str(model_id)
     res = dict(out or {})
     res["_model"] = model_label
     return res
@@ -819,7 +829,17 @@ def decide(
 
     if use_gemini and not all_vetoed and code_top is not None:
         try:
-            raw_j = judge_with_gemini(pr, cands, ev, scores, photo=photo, photo_role=photo_role)
+            sig_j = inspect.signature(judge_with_gemini)
+            if "photo" in sig_j.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_j.parameters.values()
+            ):
+                raw_j = judge_with_gemini(pr, cands, ev, scores, photo=photo, photo_role=photo_role)
+            else:
+                raw_j = judge_with_gemini(pr, cands, ev, scores)
+            if raw_j is None:
+                raw_j = {"choice": "none", "confidence": "low", "reasons": []}
+            elif isinstance(raw_j, dict) and raw_j.get("choice") is None:
+                raw_j = {**raw_j, "choice": "none"}
             known_ids = {e.id for e in (ev or []) if e.id}
             cand_ids = {c.id for c in (cands or [])}
             owners = {e.id: (e.candidate_id or "") for e in (ev or []) if e.id}
@@ -908,7 +928,7 @@ def decide(
         )
 
     if len(asked_list) < 3:
-        q = pick_question(pr, cands, ev, scores, asked=asked_list)
+        q = pick_question(pr, cands, ev, scores, asked_list)
         if q is not None and q.id not in asked_set:
             return (
                 Decision(

@@ -50,6 +50,20 @@ class AnswerRequest(BaseModel):
     text: str | None = None
 
 
+def _backend_label() -> str:
+    """Return human-readable Gemini backend label."""
+    fn = getattr(config, "backend_label", None)
+    if callable(fn):
+        return fn()
+    b = config.gemini_backend() if hasattr(config, "gemini_backend") else ""
+    if b == "vertex":
+        loc = config.get("EODI_VERTEX_LOCATION", "global") or "global"
+        return f"Vertex AI · {loc}"
+    if b == "aistudio":
+        return "Google AI Studio"
+    return b or "none"
+
+
 def _start_warmup() -> dict:
     """Start the background model warmup thread if not already running."""
     with _LOCK:
@@ -59,7 +73,7 @@ def _start_warmup() -> dict:
         _WARM["started"] = time.time()
         _WARM["finished"] = None
         _WARM["results"] = {}
-        _WARM["backend"] = config.backend_label()
+        _WARM["backend"] = _backend_label()
 
     def _run() -> None:
         try:
@@ -70,7 +84,7 @@ def _start_warmup() -> dict:
             _WARM["results"] = res
             _WARM["finished"] = time.time()
             _WARM["state"] = "done"
-            _WARM["backend"] = config.backend_label()
+            _WARM["backend"] = _backend_label()
 
     threading.Thread(target=_run, daemon=True).start()
     with _LOCK:
@@ -252,6 +266,8 @@ async def api_locate(
         raise HTTPException(status_code=400, detail="At least one of text, audio, or photo is required")
 
     role = photo_role if photo_role in ("target", "landmark") else "target"
+    if clean_text is None and audio_bytes is None:
+        role = "target"
     current = LatLng(float(lat), float(lng)) if (lat is not None and lng is not None) else None
 
     sid = _spawn_locate(
@@ -334,7 +350,7 @@ def api_get_warmup():
     with _LOCK:
         out = dict(_WARM)
         if not out.get("backend"):
-            out["backend"] = config.backend_label()
+            out["backend"] = _backend_label()
         return out
 
 
@@ -376,31 +392,13 @@ async def ws_live(ws: WebSocket):
     def _wait_from_live(sid: str) -> dict:
         return _wait_session(sid, timeout=60.0)
 
-    def _get_session(sid: str) -> dict | None:
-        with _LOCK:
-            entry = _SESSIONS.get(sid)
-            if not entry:
-                return None
-            out = copy.deepcopy(entry["resp"])
-            out["done"] = bool(entry["done"])
-            return out
+    await ws.accept()
 
-    sig = inspect.signature(live.relay)
-    params = list(sig.parameters.keys())
-    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-    kw: dict = {}
-    if "start_session" in params or has_var_kw:
-        kw["start_session"] = _start_from_live
-    if "wait_session" in params or has_var_kw:
-        kw["wait_session"] = _wait_from_live
-    if "session" in params or has_var_kw:
-        kw["session"] = _get_session
-    if kw:
-        await live.relay(ws, **kw)
-    elif len(params) >= 3:
-        await live.relay(ws, _start_from_live, _wait_from_live)
-    else:
-        await live.relay(ws)
+    async def _noop_accept(*a, **kw):
+        return None
+
+    ws.accept = _noop_accept
+    await live.relay(ws, start_session=_start_from_live, wait_session=_wait_from_live)
 
 
 if STATIC_DIR.exists():

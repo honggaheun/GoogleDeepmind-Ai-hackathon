@@ -162,8 +162,10 @@ def test_ws_live_route_starts_and_waits_for_pipeline(client, monkeypatch):
     assert client.seen["text"] == "오토웨이 타워"
 
 
-def test_eval_missing_is_404(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "EVAL_RESULTS", tmp_path / "missing.json")
+def test_eval_missing_is_404(client, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(main, "EVAL_RESULTS", Path(__file__).resolve().parent / "__missing_eval__.json")
     assert client.get("/api/eval").status_code == 404
 
 

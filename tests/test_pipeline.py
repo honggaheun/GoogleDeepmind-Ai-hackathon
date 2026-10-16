@@ -360,3 +360,59 @@ def test_answer_dunno_to_name_question_gives_best_effort_answer(fakes, monkeypat
     assert first["decision"]["kind"] == "question"
     assert resp["decision"]["kind"] == "low_confidence" and resp["decision"]["candidate_id"] == "C1"
     assert seen_asked[-1] == ["Q-name"] and resp["progress"][-1]["note"].endswith("모르겠어요")
+
+
+def test_candidate_json_carries_building_levels_for_3d():
+    c = Candidate(id="C1", building_way_id=10)
+    md = type("MD", (), {"buildings": {10: pipeline.Building(way_id=10, levels=9)}})()
+    assert (
+        pipeline._cand_json(c, {"C1": 3.0}, 1, md)["levels"] == 9
+        and pipeline._cand_json(Candidate(id="C2"), {}, 2, md)["levels"] is None
+    )
+
+
+def test_feature_chips_name_the_model_that_actually_answered():
+    assert pipeline._features("parse", [("parse", "gemini-4-argon")]) == [
+        "Gemini 4 Argon",
+        "구조화 출력",
+    ]
+    assert pipeline._features("parse", [("parse", "gemini-3.8-flash")], audio=True) == [
+        "3.8 Flash",
+        "구조화 출력",
+        "오디오 입력",
+    ]
+    assert pipeline._features(
+        "judge",
+        [("judge", "gemini-4-argon"), ("question", "gemini-3.5-flash-lite")],
+    ) == ["Gemini 4 Argon 판관", "Flash-Lite 질문"]
+    assert pipeline._features(
+        "verify",
+        [("embed", "gemini-embedding-2"), ("vision1", "gemini-3.8-flash")],
+    ) == ["Embedding 2", "3.8 Flash 박스"]
+
+
+def test_photo_only_without_region_asks_q_region_then_resumes_on_answer(fakes, monkeypatch):
+    monkeypatch.setattr(
+        pipeline.signboard,
+        "read",
+        lambda photo: {
+            "names": ["동촌 아귀찜"],
+            "queries": ["동촌"],
+            "kind": "식당",
+            "traits": "노란 간판",
+            "confidence": "high",
+        },
+    )
+    monkeypatch.setattr(pipeline.judge, "phrase_question", lambda q_in, lang="ko": q_in)
+
+    first = pipeline.locate(None, photo=b"\xff\xd8\xff\xd9")
+    assert first["decision"]["kind"] == "question"
+    assert first["decision"]["question"]["id"] == "Q-region"
+    assert [s["status"] for s in first["progress"]] == ["skipped", "skipped", "skipped", "skipped"]
+    assert first["progress"][0]["features"] == ["사진 간판 읽기"]
+
+    second = pipeline.answer(first["session_id"], text="송파구")
+    assert second["decision"]["kind"] == "answer"
+    assert second["input"]["signboard"]["applied"] == "__target__"
+    assert second["progress"][0]["features"] == ["사진 간판 읽기"]
+
